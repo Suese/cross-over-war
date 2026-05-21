@@ -7,8 +7,16 @@
 // geometry is used un-rotated and the cylinder radius is set equal to the
 // hex size — adjacent tiles then share their flat edges with no gap.
 //
-// Fog of war is driven by per-instance colour for visible/explored states,
-// and by collapsing the instance's matrix to zero scale for hidden tiles.
+// Fog of war is driven by per-instance colour for visible/explored states.
+// Hidden tiles' terrain instances are collapsed to zero scale; a separate
+// "shroud" InstancedMesh fills those slots with a uniformly dark cylinder
+// so unexplored areas read as fog of war rather than as black voids.
+//
+// Every InstancedMesh has `frustumCulled = false` because three.js computes
+// the bounding sphere from the base geometry (a unit-radius cylinder at the
+// origin), not from instance matrices — scrolling the camera so origin
+// leaves the frustum would otherwise cull the whole map. Per-draw-call
+// count stays tiny (one per terrain + one shroud), so the saving is moot.
 
 import {
   CylinderGeometry,
@@ -29,6 +37,16 @@ const HIDDEN_MATRIX = new Matrix4().makeScale(0, 0, 0);
 export function createTerrainInstanceManager({ scene, registry, assets, hexSize }) {
   const geometry = new CylinderGeometry(hexSize, hexSize, TILE_HEIGHT, 6);
   const groupsByTerrainId = new Map(); // terrainId → { mesh, tiles, material }
+  // Shroud — one InstancedMesh sized to every tile on the map. An instance
+  // is rendered at its hex position when that hex is in shroud (neither
+  // visible nor explored) and zero-scaled otherwise.
+  const shroudMaterial = new MeshStandardMaterial({
+    color: 0x0a0d18,
+    roughness: 1.0,
+    metalness: 0.0,
+  });
+  let shroudMesh = null;
+  let shroudTiles = null;     // [{ q, r }, …] parallel to shroudMesh instance order
   const reusableMatrix = new Matrix4();
 
   function disposeMeshGroup(group) {
@@ -39,6 +57,12 @@ export function createTerrainInstanceManager({ scene, registry, assets, hexSize 
   function disposeAll() {
     for (const group of groupsByTerrainId.values()) disposeMeshGroup(group);
     groupsByTerrainId.clear();
+    if (shroudMesh) {
+      scene.remove(shroudMesh);
+      shroudMesh.dispose?.();
+      shroudMesh = null;
+      shroudTiles = null;
+    }
   }
 
   function makeMaterialForTerrain(terrainId) {
@@ -63,10 +87,12 @@ export function createTerrainInstanceManager({ scene, registry, assets, hexSize 
     disposeAll();
 
     const tilesByTerrainId = new Map();
+    const allTiles = [];
     forEachEntityWith(world, ['Tile'], (entityId, tile) => {
       const list = tilesByTerrainId.get(tile.terrainId) ?? [];
       list.push({ q: tile.q, r: tile.r });
       tilesByTerrainId.set(tile.terrainId, list);
+      allTiles.push({ q: tile.q, r: tile.r });
     });
 
     for (const [terrainId, tiles] of tilesByTerrainId) {
@@ -74,6 +100,7 @@ export function createTerrainInstanceManager({ scene, registry, assets, hexSize 
       const mesh = new InstancedMesh(geometry, material, tiles.length);
       mesh.castShadow = false;
       mesh.receiveShadow = true;
+      mesh.frustumCulled = false;
       // Pre-place every instance at its hex pixel. Fog updates will mutate
       // these matrices and colours after the fact.
       for (let instanceIndex = 0; instanceIndex < tiles.length; instanceIndex++) {
@@ -88,6 +115,19 @@ export function createTerrainInstanceManager({ scene, registry, assets, hexSize 
       scene.add(mesh);
       groupsByTerrainId.set(terrainId, { mesh, tiles, material });
     }
+
+    // Shroud mesh — sized to every tile, all instances zero-scaled until the
+    // first fog update flips the unexplored ones into place.
+    shroudTiles = allTiles;
+    shroudMesh = new InstancedMesh(geometry, shroudMaterial, allTiles.length);
+    shroudMesh.castShadow = false;
+    shroudMesh.receiveShadow = true;
+    shroudMesh.frustumCulled = false;
+    for (let instanceIndex = 0; instanceIndex < allTiles.length; instanceIndex++) {
+      shroudMesh.setMatrixAt(instanceIndex, HIDDEN_MATRIX);
+    }
+    shroudMesh.instanceMatrix.needsUpdate = true;
+    scene.add(shroudMesh);
   }
 
   // viewerPlayerId may be null (omniscient — render every tile fully lit).
@@ -112,6 +152,22 @@ export function createTerrainInstanceManager({ scene, registry, assets, hexSize 
       }
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
+
+    // Shroud is the inverse — full-scale on hidden tiles, zero on the rest.
+    if (shroudMesh && shroudTiles) {
+      for (let instanceIndex = 0; instanceIndex < shroudTiles.length; instanceIndex++) {
+        const tile = shroudTiles[instanceIndex];
+        const key = tile.q + ',' + tile.r;
+        if (fogState(fog, key) === 'hidden') {
+          const point = hexToPixel(tile.q, tile.r, hexSize);
+          reusableMatrix.identity().setPosition(point.x, -TILE_HEIGHT / 2, point.z);
+          shroudMesh.setMatrixAt(instanceIndex, reusableMatrix);
+        } else {
+          shroudMesh.setMatrixAt(instanceIndex, HIDDEN_MATRIX);
+        }
+      }
+      shroudMesh.instanceMatrix.needsUpdate = true;
     }
   }
 
