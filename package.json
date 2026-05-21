@@ -6,10 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "audit-assets": "node scripts/audit-assets.mjs",
+    "generate-base-pngs": "node scripts/generate-base-pngs.mjs",
+    "prebuild": "node scripts/audit-assets.mjs"
   },
   "dependencies": {
-    "peerjs": "^1.5.4"
+    "peerjs": "^1.5.4",
+    "simplex-noise": "^4.0.3",
+    "three": "^0.184.0"
   },
   "devDependencies": {
     "vite": "^5.4.0"

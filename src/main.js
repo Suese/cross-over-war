@@ -2,6 +2,7 @@
 // Host/Join PeerJS pattern: the room code is the host's peer id, shared via URL.
 
 import { HostNet, ClientNet } from './net.js';
+import { startGameSession } from './game/bootstrap.js';
 
 const PLAYER_COLORS = ['#c81428', '#1a4a8a', '#1a8a50', '#d4a834', '#6a3aa8', '#c46a14'];
 
@@ -18,6 +19,10 @@ let lobby = {
   players: [],   // [{ id, name }]
   started: false,
 };
+
+// Active game session created when the host starts or a client gets its first
+// snapshot. Has methods like ingestSnapshot(snapshot).
+let gameSession = null;
 
 // ── Elements ────────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -54,7 +59,7 @@ $('start-btn').addEventListener('click', () => {
   if (mode !== 'host') return;
   lobby.started = true;
   broadcastLobby();
-  enterGame();
+  startHostSession();
 });
 $('copy-code').addEventListener('click', () => {
   const url = roomUrl(roomCode);
@@ -100,8 +105,11 @@ async function startHost() {
         broadcastLobby();
         renderWaiting();
       }
+      return;
     }
-    // Future: forward game actions to the game module.
+    if (data.type === 'action') {
+      gameSession?.handleClientAction?.(fromId, data.action);
+    }
   });
 
   mode = 'host';
@@ -125,8 +133,13 @@ async function startClient() {
     if (!data || typeof data !== 'object') return;
     if (data.type === 'lobby') {
       lobby = data.lobby;
-      if (lobby.started) enterGame();
+      if (lobby.started) startClientSession();
       else renderWaiting();
+      return;
+    }
+    if (data.type === 'snapshot') {
+      if (!gameSession) startClientSession();
+      gameSession.ingestSnapshot(data.snapshot);
     }
   });
   client.on('close', () => setStatus('Disconnected from host.'));
@@ -177,18 +190,42 @@ function broadcastLobby() {
   host.broadcast({ type: 'lobby', lobby });
 }
 
-function enterGame() {
+function startHostSession() {
   show('game-ui');
-  // Placeholder banner — actual gameplay will land in a follow-up module.
-  $('turn-banner').textContent = 'Game started — implementation pending.';
-  const sb = $('scoreboard');
-  sb.innerHTML = '';
-  lobby.players.forEach((p, i) => {
-    const div = document.createElement('div');
-    div.className = 'score-card';
-    div.innerHTML = `<span class="player-dot" style="background:${PLAYER_COLORS[i % PLAYER_COLORS.length]}"></span>
-                     <strong>${escapeHtml(p.name)}</strong>${p.id === myId ? ' (you)' : ''}`;
-    sb.appendChild(div);
+  const canvas = $('board');
+  const hudRoot = $('game-ui');
+  // Translate net-layer player shape ({id, name}) → game-layer shape ({playerId, name}).
+  const players = lobby.players.map(p => ({ playerId: p.id, name: p.name }));
+  gameSession = startGameSession({
+    mode: 'host',
+    canvas,
+    hudRoot,
+    myPlayerId: myId,
+    players,
+    net: {
+      broadcast: (message) => host?.broadcast(message),
+      sendAction: () => {}, // unused on host
+    },
+    onLeave: () => location.reload(),
+  });
+}
+
+function startClientSession() {
+  show('game-ui');
+  const canvas = $('board');
+  const hudRoot = $('game-ui');
+  const players = lobby.players.map(p => ({ playerId: p.id, name: p.name }));
+  gameSession = startGameSession({
+    mode: 'client',
+    canvas,
+    hudRoot,
+    myPlayerId: myId,
+    players,
+    net: {
+      broadcast: () => {},
+      sendAction: (action) => client?.send({ type: 'action', action }),
+    },
+    onLeave: () => location.reload(),
   });
 }
 
