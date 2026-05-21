@@ -168,12 +168,12 @@ export function createSceneRenderer(canvas) {
     }
   }
 
-  // The grace window is the time remaining on the longest active animation
-  // plus a small fudge — enough that anything destroyed "at arrival" sticks
-  // around until the player visually sees the hero land on it.
+  // The grace window is exactly the time remaining on the longest active
+  // animation. The collectable mesh stays on screen until the hero visually
+  // lands on it, then disappears the instant the animation completes — same
+  // moment the visit popover fires (see bootstrap.queueAnimationsFromEvents).
   function animationGraceMs(heroAnimations, nowMs) {
-    const remaining = heroAnimations.maxRemainingMs?.(nowMs) ?? 1200;
-    return Math.max(400, remaining + 120);
+    return heroAnimations.maxRemainingMs?.(nowMs) ?? 0;
   }
 
   function showPath(pathPlan) {

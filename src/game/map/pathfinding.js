@@ -31,13 +31,16 @@ function getOrBuildTileIndex(world, registry) {
     if (!terrain) return;
     index.set(hexKey(tile.q, tile.r), { entityId, tile, terrain });
   });
-  // Layer TerrainModifier entities on top — each one overrides the base
-  // terrain's passability map at its hex. Built once on first findPath call
-  // after game start; if any code starts adding/removing modifiers mid-game
+  // Layer TerrainOverride entities on top — each one replaces the base
+  // terrain at its hex with a different registered terrain (e.g. base/grass
+  // → base/bramble around a structure). Built once on first findPath call
+  // after game start; if any code starts adding/removing overrides mid-game
   // it must call invalidateTileIndex() so this gets rebuilt.
-  forEachEntityWith(world, ['TerrainModifier', 'Position'], (_id, modifier, position) => {
+  forEachEntityWith(world, ['TerrainOverride', 'Position'], (_id, override, position) => {
     const entry = index.get(hexKey(position.q, position.r));
-    if (entry) entry.modifier = modifier;
+    if (!entry) return;
+    const resolved = getTerrain(registry, override.terrainId);
+    if (resolved) entry.effectiveTerrain = resolved;
   });
   world._tileIndex = index;
   world._tileIndexRegistryRef = registry;
@@ -107,7 +110,7 @@ export function findPath(world, registry, start, goal, options = {}) {
   const tileIndex = getOrBuildTileIndex(world, registry);
   const goalKey = hexKey(goal.q, goal.r);
   const goalTile = tileIndex.get(goalKey);
-  const goalCarrier = goalTile?.modifier ?? goalTile?.terrain;
+  const goalCarrier = goalTile?.effectiveTerrain ?? goalTile?.terrain;
   if (!goalCarrier || resolveTerrainCost(goalCarrier, traversalModes) == null) return null;
   if (blocked && blocked.has(goalKey)) return null;
 
@@ -135,7 +138,7 @@ export function findPath(world, registry, start, goal, options = {}) {
       const nextKey = hexKey(nextQ, nextR);
       const nextTile = tileIndex.get(nextKey);
       if (!nextTile) continue;
-      const stepCost = resolveTerrainCost(nextTile.modifier ?? nextTile.terrain, traversalModes);
+      const stepCost = resolveTerrainCost(nextTile.effectiveTerrain ?? nextTile.terrain, traversalModes);
       if (stepCost == null) continue;
       if (explored && !explored.has(nextKey)) continue;
       if (blocked && blocked.has(nextKey)) continue;

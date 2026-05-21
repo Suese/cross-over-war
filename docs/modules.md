@@ -279,7 +279,7 @@ assembled by attaching atomic components to entities — usually inside a prefab
 | `Visitable`       | `{ message }` — stepping onto this entity's hex fires `entity_visited` and shows the message. Supports `{heroName}` substitution. |
 | `ConsumedOnVisit` | Empty tag — when combined with `Visitable`, the entity is destroyed after the visit fires (one-shot pickups). |
 | `Actionable`      | `{ actionTypeId }` — references a registered action type (`base/take`, `base/visit`, …) whose `{ icon, label }` the hover layer renders next to the cursor while flipping it to a pointer. Per-entity payload is just an id. |
-| `TerrainModifier` | `{ components }` — per-hex override of `PassableBy*`. Pathfinder uses modifier instead of base terrain. |
+| `TerrainOverride` | `{ terrainId }` — per-hex swap to a different registered terrain. Pathfinder and renderer both treat the override as the effective terrain (visual + passability come from the referenced definition). |
 | `BlocksMovement`  | Empty tag — the hex this entity is on is treated as occupied for pathfinding (heroes, big props). |
 | `Traverses<Mode>` | Empty tag (e.g. `TraversesLand`) — the mover can cross terrain that declares `PassableBy<Mode>`. |
 | `Hero`            | `{ archetypeId, name, visionRadius, modelKey }` — gameplay-side hero data.                      |
@@ -291,7 +291,7 @@ assembled by attaching atomic components to entities — usually inside a prefab
 Attach components freely with `addComponent(world, entityId, 'YourName', data)`.
 Anything is allowed — there is no central type registry. Atomic over monolithic:
 prefer many small components (`Visitable`, `ConsumedOnVisit`, `BlocksMovement`,
-`TraversesLand`) over one big bag of fields.
+`TraversesLand`, `TerrainOverride`) over one big bag of fields.
 
 ### How to make a Collectable
 
@@ -374,26 +374,29 @@ decoration — it renders, it shows up in the right-click info panel, but
 stepping onto its hex does nothing special. Add `BlocksMovement` if you
 want a static obstacle (boulder, ruin) heroes cannot pass through.
 
-### How to make a Terrain Modifier
+### How to make a Terrain Override
 
-When a multi-hex structure needs to make non-anchor hexes impassable
-without rewriting the underlying tile, attach a `TerrainModifier`:
+When a multi-hex structure should swap the terrain on its footprint hexes
+to something different — bramble around a hut, lava under a forge,
+shallows along a dock — attach a `TerrainOverride` that references the
+registered terrain you want to appear there:
 
 ```js
 addComponent(world, wallId, 'Position', { q, r });
-addComponent(world, wallId, 'TerrainModifier', {
-  components: { PassableByAir: { cost: 1 } },   // fliers only
-});
+addComponent(world, wallId, 'TerrainOverride', { terrainId: 'base/bramble' });
 ```
 
-The pathfinder calls `resolveTerrainCost(modifier ?? terrain, modes)` for
-each candidate tile, so the modifier completely replaces the base terrain's
-`PassableBy*` entries for movement purposes (rendering is untouched — the
-ground still shows whatever terrain texture is underneath).
+The pathfinder, renderer, and right-click info panel all resolve through
+`getTerrain(registry, override.terrainId)` and treat the result as the
+effective terrain at that hex — visual, passability, description, and
+movement cost all come from the referenced terrain definition. The base
+tile underneath stays untouched (`Tile.terrainId` doesn't change), so
+removing the override entity reverts the hex.
 
-If you start mutating modifiers mid-game, call `invalidateTileIndex(world)`
-so the pathfinder rebuilds its cache. Spawn-time modifiers are picked up
-automatically the first time `findPath` is called.
+If you start adding or removing overrides mid-game, call
+`invalidateTileIndex(world)` so the pathfinder rebuilds its cache.
+Spawn-time overrides are picked up automatically the first time
+`findPath` is called.
 
 ---
 
@@ -406,8 +409,8 @@ engine builds "buildings" without needing a `Building` concept.
 The Mushroom Hut prefab in `src/modules/testing/` is the worked example:
 one anchor entity (carries `MapObject + Position + Visitable + Actionable`
 and the visible mesh) plus four wall entities (`Position +
-TerrainModifier`). The hut emerges from the atoms; the engine has no idea
-what a "Mushroom Hut" is.
+TerrainOverride` swapping the hex to bramble). The hut emerges from the
+atoms; the engine has no idea what a "Mushroom Hut" is.
 
 Anything can go in a prefab, but on the main map the practical mix is
 some combination of:
@@ -417,7 +420,8 @@ some combination of:
   make it a one-shot pickup).
 - **UI hint** — `Actionable { actionTypeId }` on the anchor so the hover
   layer shows the cursor prompt.
-- **Passability changes** — `TerrainModifier` on non-anchor footprint hexes;
+- **Passability changes** — `TerrainOverride` on non-anchor footprint hexes
+  to swap them to a different registered terrain (bramble, lava, …);
   `BlocksMovement` on the anchor if heroes shouldn't be able to stand on it.
 - **Visible structure** — the type's `buildMesh` returns a `THREE.Group`
   that may visually span more than one hex (using local-space offsets), but
@@ -491,8 +495,8 @@ const PREFAB_ID = 'wizards-tower/tower';
 const DENSITY_TILES_PER_TOWER = 800;
 
 // Footprint: two walls behind the entrance (the POI). The walls become
-// fliers-only TerrainModifier entities; the POI tile stays land-passable
-// so heroes can walk up to it.
+// bramble tiles via TerrainOverride; the POI tile stays land-passable so
+// heroes can walk up to it.
 const WALL_OFFSETS = [
   { dq:  0, dr: -1 },   // N
   { dq:  1, dr: -1 },   // NE
@@ -527,16 +531,15 @@ export default {
       });
       addComponent(world, poiId, 'Actionable', { actionTypeId: 'base/visit' });
 
-      // Walls — no rendering, no visit. Just passability override.
+      // Walls — no rendering, no visit. Just a terrain swap: the hex now
+      // reads as bramble for both visual and pathfinding purposes.
       for (const offset of WALL_OFFSETS) {
         const wallId = createEntity(world);
         addComponent(world, wallId, 'Position', {
           q: anchorQ + offset.dq,
           r: anchorR + offset.dr,
         });
-        addComponent(world, wallId, 'TerrainModifier', {
-          components: { PassableByAir: { cost: 1 } },
-        });
+        addComponent(world, wallId, 'TerrainOverride', { terrainId: 'base/bramble' });
       }
 
       return poiId;
@@ -651,7 +654,7 @@ will refuse a path that tries to walk through the walls.
 | Rendering        | `buildTowerMesh()` returning a `THREE.Group` shifted into the cove          |
 | Visit behaviour  | `Visitable` component on the anchor — engine fires the visit event         |
 | Hover hint       | `Actionable` on the anchor — flips cursor to pointer + shows the label     |
-| Passability      | `TerrainModifier` on each wall hex; pathfinder consults `modifier ?? terrain` |
+| Passability      | `TerrainOverride { terrainId: 'base/bramble' }` on each wall hex; pathfinder + renderer use the override's terrain |
 
 No engine files were edited. Every piece is opt-in atomic component data
 that existing systems were already looking for.

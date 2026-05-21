@@ -3,11 +3,11 @@
 //
 //   • Camp Fire     — a single-hex collectable; visiting consumes it and
 //                     pops "You find nothing.".
-//   • Mushroom Hut  — a four-hex structure with a Point-of-Interest entrance
-//                     and three TerrainModifier-only walls (PassableByAir
-//                     only). Demonstrates the prefab-as-composition pattern:
-//                     a single prefab call stamps out a coordinated cluster
-//                     of POI + walls + visible mesh.
+//   • Mushroom Hut  — a four-hex structure: a visitable entrance plus four
+//                     bramble walls (via TerrainOverride) that wrap the
+//                     entrance in a cove. Demonstrates the prefab-as-
+//                     composition pattern: a single prefab call stamps out
+//                     a coordinated cluster of anchor + walls + visible mesh.
 //
 // Both types are scattered by world spawners after hero placement. Adding a
 // new sandbox object means adding a registerMapObjectType / registerPrefab /
@@ -48,8 +48,8 @@ const HUT_DEFAULT_MESSAGE = 'Sorry {heroName} but the princess is in another cas
 //        NW  NE
 //        W [POI] E
 //
-// Walls get a TerrainModifier-only entity that overrides passability to
-// PassableByAir alone, so fliers can still cross over.
+// Wall hexes get a TerrainOverride entity that swaps them to bramble —
+// which is air-passable only, so fliers can still cross over.
 const HUT_FOOTPRINT_OFFSETS = [
   { dq:  1, dr:  0 },   // E
   { dq: -1, dr:  0 },   // W
@@ -123,10 +123,11 @@ export default {
       buildMesh: () => buildMushroomHutMesh(),
     });
 
-    // The prefab stamps out four entities in one call: the POI at the anchor
-    // (carries the visible mesh + visit message) plus a TerrainModifier-only
-    // entity per footprint hex. Demonstrates how prefabs combine atomic
-    // pieces (rendering, POI, terrain override) into one logical object.
+    // The prefab stamps out five entities in one call: the visitable anchor
+    // (carries the visible mesh + visit message) plus a TerrainOverride
+    // entity per wall hex (each one swaps that hex to bramble).
+    // Demonstrates how prefabs combine atomic pieces (rendering, visit,
+    // terrain swap) into one logical object.
     registerPrefab(registry, HUT_PREFAB_ID, (world, params) => {
       const anchorQ = params.q ?? 0;
       const anchorR = params.r ?? 0;
@@ -147,9 +148,10 @@ export default {
           q: anchorQ + offset.dq,
           r: anchorR + offset.dr,
         });
-        addComponent(world, wallId, 'TerrainModifier', {
-          components: { PassableByAir: { cost: 1 } },
-        });
+        // The cove "walls" are bramble tiles — full terrain override, which
+        // gives both the bramble visual + bramble's passability (air only)
+        // in one component. Cleaner than carrying inline passability bits.
+        addComponent(world, wallId, 'TerrainOverride', { terrainId: 'bramble' });
       }
 
       return poiId;
@@ -309,8 +311,10 @@ function buildMushroomHutMesh() {
   // Wrap and transform. The cove's wall centroid sits at z ≈ -0.75 in
   // world units from the POI hex, so shifting the hut by that places it
   // visually inside the cove with the POI tile outside (south) of it.
+  // Inner scale was 0.75; bumped to 1.125 (150% of previous) so the hut
+  // reads as a proper structure relative to the surrounding hexes.
   const outer = new Group();
-  inner.scale.set(0.75, 0.75, 0.75);
+  inner.scale.set(1.125, 1.125, 1.125);
   inner.position.set(0, 0, -0.75);
   outer.add(inner);
   return outer;

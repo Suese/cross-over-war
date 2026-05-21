@@ -86,12 +86,22 @@ export function createTerrainInstanceManager({ scene, registry, assets, hexSize 
   function buildFromWorld(world) {
     disposeAll();
 
+    // Collect any per-hex TerrainOverride entities first so we can group
+    // tiles by their *effective* terrain id (base or overridden) below.
+    // Overrides only show up after world spawners have run, which is
+    // before the first buildFromWorld call.
+    const overridesByHexKey = new Map();
+    forEachEntityWith(world, ['TerrainOverride', 'Position'], (_id, override, position) => {
+      overridesByHexKey.set(position.q + ',' + position.r, override.terrainId);
+    });
+
     const tilesByTerrainId = new Map();
     const allTiles = [];
     forEachEntityWith(world, ['Tile'], (entityId, tile) => {
-      const list = tilesByTerrainId.get(tile.terrainId) ?? [];
+      const effectiveTerrainId = overridesByHexKey.get(tile.q + ',' + tile.r) ?? tile.terrainId;
+      const list = tilesByTerrainId.get(effectiveTerrainId) ?? [];
       list.push({ q: tile.q, r: tile.r });
-      tilesByTerrainId.set(tile.terrainId, list);
+      tilesByTerrainId.set(effectiveTerrainId, list);
       allTiles.push({ q: tile.q, r: tile.r });
     });
 

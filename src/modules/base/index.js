@@ -81,6 +81,16 @@ export default {
       fallbackColor: 0x8a7c6a,
       textureKey: 'base/mountain.png',
     });
+
+    registerTerrain(registry, {
+      id: 'bramble',
+      name: 'Bramble',
+      description: 'A dense thicket of thorny vines. Nothing on foot gets through, and there\'s no water to swim — only fliers can cross.',
+      components: {
+        PassableByAir: { cost: 1 },
+      },
+      fallbackColor: 0x3a4d24,
+    });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME,
       kind: 'texture',

@@ -380,9 +380,8 @@ export class GameRoom {
       // Block movement into tiles occupied by another hero / map object.
       // Re-checked each step in case the world state changed since planning.
       if (blockedKeys.has(nextKey)) break;
-      const terrain = getTerrain(this.registry, this._terrainAt(next.q, next.r));
-      const modifier = this._modifierAt(next.q, next.r);
-      const cost = resolveTerrainCost(modifier ?? terrain, traversalModes);
+      const terrain = this._effectiveTerrainAt(next.q, next.r);
+      const cost = resolveTerrainCost(terrain, traversalModes);
       if (cost == null) break;
       if (movement.movementLeft < cost) break;
       patchComponentTracked(this.world, heroEntityId, 'Movement', ['movementLeft'], movement.movementLeft - cost);
@@ -532,21 +531,24 @@ export class GameRoom {
     return foundTerrain;
   }
 
-  // Returns the TerrainModifier component sitting on the given hex, or null.
-  // The cached tile index already has modifiers folded in once it's built;
-  // we fall back to a linear scan when called before the first findPath().
-  _modifierAt(q, r) {
+  // Returns the resolved terrain definition for the given hex — base terrain
+  // unless a TerrainOverride entity is sitting on it, in which case the
+  // override's referenced terrain wins. Uses the pathfinder's cached tile
+  // index when available; falls back to a linear scan otherwise.
+  _effectiveTerrainAt(q, r) {
     const cache = this.world._tileIndex;
     if (cache) {
       const hit = cache.get(q + ',' + r);
-      return hit?.modifier ?? null;
+      if (!hit) return null;
+      return hit.effectiveTerrain ?? hit.terrain ?? null;
     }
-    let result = null;
-    forEachEntityWith(this.world, ['TerrainModifier', 'Position'], (_id, modifier, position) => {
-      if (result) return;
-      if (position.q === q && position.r === r) result = modifier;
+    const baseTerrainId = this._terrainAt(q, r);
+    let overrideTerrainId = null;
+    forEachEntityWith(this.world, ['TerrainOverride', 'Position'], (_id, override, position) => {
+      if (overrideTerrainId) return;
+      if (position.q === q && position.r === r) overrideTerrainId = override.terrainId;
     });
-    return result;
+    return getTerrain(this.registry, overrideTerrainId ?? baseTerrainId);
   }
 }
 

@@ -467,8 +467,8 @@ export function startGameSession({
     if (heroInfo) sections.push(buildHeroSection(heroInfo));
 
     const terrain = lookupTerrainAt(world, viewerRegistry(), hex.q, hex.r);
-    const modifier = lookupModifierAt(world, hex.q, hex.r);
-    if (terrain || modifier) sections.push(buildTerrainSection(terrain, modifier));
+    const override = lookupOverrideTerrainAt(world, viewerRegistry(), hex.q, hex.r);
+    if (terrain || override) sections.push(buildTerrainSection(terrain, override));
 
     if (sections.length === 0) return plainLine('Nothing here.');
     return sections.join('<div style="height:8px"></div>');
@@ -485,12 +485,12 @@ export function startGameSession({
     return sectionTitle(hero.name ?? 'Hero', '#a8e6ff') + ownerLine + modesLine;
   }
 
-  function buildTerrainSection(terrain, modifier) {
-    // A TerrainModifier on the hex completely overrides the base terrain's
-    // passability — show the effective list, and label it so the player
-    // knows their grass tile is currently blocked by a structure.
-    const passabilityCarrier = modifier ?? terrain;
-    const passable = listPassableModes(passabilityCarrier);
+  function buildTerrainSection(terrain, override) {
+    // When a TerrainOverride is on the hex it fully replaces the base
+    // terrain — show the override's name, description, and passability;
+    // the base terrain is no longer relevant to the player.
+    const effective = override ?? terrain;
+    const passable = listPassableModes(effective);
     const traversalBody = passable.length
       ? '<div style="margin-top:2px">'
         + passable.map(entry =>
@@ -501,12 +501,11 @@ export function startGameSession({
           ).join('')
         + '</div>'
       : '<div style="color:#ff8484">Impassable</div>';
-    const traversalLabel = modifier ? 'Traversal (modified):' : 'Traversal:';
-    const description = terrain?.description
-      ? '<div style="opacity:0.8; margin-top:4px">' + escapeHtml(terrain.description) + '</div>'
+    const description = effective?.description
+      ? '<div style="opacity:0.8; margin-top:4px">' + escapeHtml(effective.description) + '</div>'
       : '';
-    return sectionTitle(terrain?.name ?? terrain?.id ?? 'Terrain', '#7fffa8')
-      + '<div>' + traversalLabel + '</div>'
+    return sectionTitle(effective?.name ?? effective?.id ?? 'Terrain', '#7fffa8')
+      + '<div>Traversal:</div>'
       + traversalBody
       + description;
   }
@@ -583,18 +582,18 @@ export function startGameSession({
     return terrain;
   }
 
-  function lookupModifierAt(world, q, r) {
+  function lookupOverrideTerrainAt(world, registry, q, r) {
     const cache = world._tileIndex;
     if (cache) {
       const hit = cache.get(q + ',' + r);
-      return hit?.modifier ?? null;
+      return hit?.effectiveTerrain ?? null;
     }
-    let result = null;
-    forEachEntityWith(world, ['TerrainModifier', 'Position'], (_id, modifier, position) => {
-      if (result) return;
-      if (position.q === q && position.r === r) result = modifier;
+    let overrideTerrainId = null;
+    forEachEntityWith(world, ['TerrainOverride', 'Position'], (_id, override, position) => {
+      if (overrideTerrainId) return;
+      if (position.q === q && position.r === r) overrideTerrainId = override.terrainId;
     });
-    return result;
+    return overrideTerrainId ? (registry.terrains.get(overrideTerrainId) ?? null) : null;
   }
 
   function getTerrainFromRegistry(registry, terrainId) {
@@ -639,24 +638,27 @@ export function startGameSession({
   const ANIMATION_STEP_MS = 220;
 
   function queueAnimationsFromEvents(events) {
-    // Track how long any subsequent popover should wait so it fires after
-    // the hero finishes walking onto the visited tile. Events are emitted
-    // in play order by the host, so an entity_visited event always follows
-    // the hero_moved event that delivered the hero there.
+    // Two-pass scan so deferred UI (popovers) reflects the full animation
+    // duration regardless of event ordering in the array. The host emits
+    // entity_visited inside the per-step loop and hero_moved only after,
+    // so the visit event comes FIRST in the events array — without the
+    // two-pass split, the popover would schedule at delay=0 and fire the
+    // moment the user clicked, before the walk animation begins.
     let pendingDelayMs = 0;
     for (const event of events) {
-      if (event?.type === 'hero_moved') {
-        const hero = getComponent(viewerWorld(), event.heroEntityId, 'Hero');
-        heroAnimations.enqueueFromEvent(event, myPlayerId, hero);
-        if (event.playerId === myPlayerId && Array.isArray(event.path)) {
-          pendingDelayMs = Math.max(pendingDelayMs, event.path.length * ANIMATION_STEP_MS);
-        }
-      } else if (event?.type === 'entity_visited') {
-        if (event.playerId !== myPlayerId) continue;
-        const message = event.message ?? '';
-        const title = event.objectName ?? null;
-        setTimeout(() => { showOkay(message, { title }); }, pendingDelayMs);
+      if (event?.type !== 'hero_moved') continue;
+      const hero = getComponent(viewerWorld(), event.heroEntityId, 'Hero');
+      heroAnimations.enqueueFromEvent(event, myPlayerId, hero);
+      if (event.playerId === myPlayerId && Array.isArray(event.path)) {
+        pendingDelayMs = Math.max(pendingDelayMs, event.path.length * ANIMATION_STEP_MS);
       }
+    }
+    for (const event of events) {
+      if (event?.type !== 'entity_visited') continue;
+      if (event.playerId !== myPlayerId) continue;
+      const message = event.message ?? '';
+      const title = event.objectName ?? null;
+      setTimeout(() => { showOkay(message, { title }); }, pendingDelayMs);
     }
   }
 
@@ -709,9 +711,11 @@ function rebuildPathCosts(world, registry, startPosition, rawSteps, traversalMod
         index.set(tile.q + ',' + tile.r, { tile, terrain });
       }
     }
-    forEachEntityWith(world, ['TerrainModifier', 'Position'], (_id, modifier, position) => {
+    forEachEntityWith(world, ['TerrainOverride', 'Position'], (_id, override, position) => {
       const entry = index.get(position.q + ',' + position.r);
-      if (entry) entry.modifier = modifier;
+      if (!entry) return;
+      const resolved = getTerrain(registry, override.terrainId);
+      if (resolved) entry.effectiveTerrain = resolved;
     });
     world._tileIndex = index;
     world._tileIndexRegistryRef = registry;
@@ -722,7 +726,7 @@ function rebuildPathCosts(world, registry, startPosition, rawSteps, traversalMod
   const out = [];
   for (const step of rawSteps) {
     const lookup = index.get(step.q + ',' + step.r);
-    const carrier = lookup?.modifier ?? lookup?.terrain;
+    const carrier = lookup?.effectiveTerrain ?? lookup?.terrain;
     const cost = resolveTerrainCost(carrier, modes);
     running += cost ?? 1;
     out.push({ q: step.q, r: step.r, cumulativeCost: running });
