@@ -2,14 +2,18 @@
 // into a running game session.
 //
 // Host vs client:
-//   • Host owns a GameRoom that drives the authoritative world and
-//     broadcasts snapshots. Client input is applied via gameRoom.handleAction.
-//   • Client owns a passive world that ingests snapshots; tile data is NOT
-//     in the snapshot — the client regenerates tiles from the seed embedded
-//     in WorldState the first time it sees a snapshot. Client input is sent
-//     to the host via the provided sendAction callback.
+//   • Host owns a GameRoom that broadcasts init_snapshot / delta / state_hash
+//     / players_changed messages. Local input is applied via gameRoom.handleAction.
+//   • Client maintains a passive ECS world. The host sends one full
+//     init_snapshot, then deltas; the client applies them in sequence and
+//     verifies state_hash messages. On a gap or mismatch the client sends
+//     a `resync_request` action and the host responds with a fresh
+//     init_snapshot.
 
-import { createWorld, getComponent, forEachEntityWith } from './ecs/world.js';
+import {
+  createWorld, getComponent, forEachEntityWith,
+  applyChangeOps, addComponent, setChangeRecording,
+} from './ecs/world.js';
 import { createRegistry, getTerrain } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
 import { createAssetLoader } from './modules/assetLoader.js';
@@ -22,14 +26,17 @@ import { installCursorHud } from './input/cursorHud.js';
 import { installHudOverlay } from './ui/hudOverlay.js';
 import { findPath, estimateTurnsForPath, invalidateTileIndex } from './map/pathfinding.js';
 import { generateMap } from './map/mapgen.js';
+import { inflateFog } from './map/fog.js';
+import { hashWorld, MESSAGE_KINDS } from './protocol.js';
 
 export function startGameSession({
-  mode,                       // 'host' | 'client'
+  mode,                 // 'host' | 'client'
   canvas,
   hudRoot,
   myPlayerId,
-  players,                    // initial player list (host only)
-  net,                        // { broadcast(msg), sendAction(action) }
+  players,              // host: initial player list
+  net,                  // { broadcast(msg), sendTo(peerId, msg), sendAction(action) }
+  loadFromSnapshot,     // host-only: an optional persistence-loaded snapshot to resume
   onLeave,
 }) {
   const assets = createAssetLoader();
@@ -39,14 +46,33 @@ export function startGameSession({
   let clientRegistry = null;
   let lastKnownPlayers = players ?? [];
 
+  // Client-side replication bookkeeping.
+  let expectedSeq = 1;            // next delta seq the client expects to apply
+  let pendingResync = false;      // true while a resync request is in flight
+  let haveInitSnapshot = false;
+
   if (mode === 'host') {
     gameRoom = new GameRoom({
       assets,
       broadcast: (message) => net.broadcast?.(message),
+      sendTo: (peerId, message) => net.sendTo?.(peerId, message),
       log: (...args) => console.log('[gameRoom]', ...args),
     });
-    for (const player of lastKnownPlayers) gameRoom.addPlayer(player.playerId ?? player.id, player.name);
-    gameRoom.startGame();
+    if (loadFromSnapshot) {
+      // Saved game flow:
+      //   1. Restore the snapshot — gameRoom.players gets replaced with the
+      //      saved roster (all marked disconnected).
+      //   2. Re-add each currently-connected lobby player; addPlayer matches
+      //      by name and rebinds the old playerId onto the new peer id,
+      //      remapping Ownership / fog / playerOrder along the way.
+      gameRoom.loadFromSave(loadFromSnapshot);
+      for (const player of lastKnownPlayers) {
+        gameRoom.addPlayer(player.playerId ?? player.id, player.name);
+      }
+    } else {
+      for (const player of lastKnownPlayers) gameRoom.addPlayer(player.playerId ?? player.id, player.name);
+      gameRoom.startNewGame();
+    }
   } else {
     clientWorld = createWorld();
     clientRegistry = createRegistry();
@@ -61,9 +87,7 @@ export function startGameSession({
     hexSize: renderer.HEX_SIZE,
   });
 
-  if (mode === 'host') {
-    terrainManager.buildFromWorld(viewerWorld());
-  }
+  if (mode === 'host') terrainManager.buildFromWorld(viewerWorld());
 
   // ── HUD ─────────────────────────────────────────────────────────────────
   let selectedHeroEntityId = null;
@@ -176,47 +200,118 @@ export function startGameSession({
 
   logMissingAssetsToConsole(assets, viewerRegistry());
 
-  // ── Snapshot ingestion (client) ─────────────────────────────────────────
-  function ensureClientTilesGenerated(snapshot) {
-    if (!clientWorld) return;
-    if (clientWorld.componentStores.get('Tile')?.size > 0) return;
-    // Pull the seed straight out of the incoming snapshot rather than the
-    // already-applied world state, because applySnapshot hasn't run yet.
-    const worldStateEntries = snapshot.components?.WorldState ?? {};
-    const firstEntry = Object.values(worldStateEntries)[0];
-    if (!firstEntry) return;
-    const seed = firstEntry.seed ?? 1337;
-    const width = firstEntry.mapWidth ?? 256;
-    const height = firstEntry.mapHeight ?? 256;
-    console.log('[client] generating ' + width + '×' + height + ' map from seed ' + seed);
-    const before = performance.now();
-    generateMap(clientWorld, clientRegistry, { width, height, seed, tilePrefabId: 'base/tile' });
-    invalidateTileIndex(clientWorld);
-    console.log('[client] map generated in ' + Math.round(performance.now() - before) + 'ms');
-  }
-
-  function ingestSnapshot(snapshot) {
+  // ── Message handling (client) ───────────────────────────────────────────
+  function ingestInitSnapshot(snapshot) {
     if (mode === 'host') return;
-    const firstSnapshot = !(clientWorld.componentStores.get('Tile')?.size > 0);
-    ensureClientTilesGenerated(snapshot);
-    GameRoom.applySnapshot(clientWorld, clientRegistry, snapshot);
+    // Regenerate tiles from the seed before applying the rest, then wipe
+    // non-tile state and replay components verbatim.
+    if (!(clientWorld.componentStores.get('Tile')?.size > 0)) {
+      const seed = snapshot.seed ?? 1337;
+      const width = snapshot.mapWidth ?? 256;
+      const height = snapshot.mapHeight ?? 256;
+      const before = performance.now();
+      generateMap(clientWorld, clientRegistry, { width, height, seed, tilePrefabId: 'base/tile' });
+      invalidateTileIndex(clientWorld);
+      console.log('[client] generated ' + width + '×' + height + ' map in ' + Math.round(performance.now() - before) + 'ms');
+    }
+
+    const tileStore = clientWorld.componentStores.get('Tile');
+    clientWorld.nextEntityId = Math.max(snapshot.nextEntityId, clientWorld.nextEntityId);
+    clientWorld.entities = new Set(snapshot.entityIds);
+    clientWorld.componentStores = new Map();
+    setChangeRecording(clientWorld, false);
+    for (const componentName in snapshot.components) {
+      const map = new Map();
+      for (const entityIdStr in snapshot.components[componentName]) {
+        const entityId = Number(entityIdStr);
+        let data = snapshot.components[componentName][entityIdStr];
+        if (componentName === 'WorldState') {
+          data = { ...data, fogByPlayer: inflateFog(data.fogByPlayer ?? {}) };
+          clientWorld._worldStateEntity = entityId;
+        }
+        map.set(entityId, data);
+      }
+      clientWorld.componentStores.set(componentName, map);
+    }
+    if (tileStore) {
+      for (const id of tileStore.keys()) clientWorld.entities.add(id);
+      clientWorld.componentStores.set('Tile', tileStore);
+    }
+
+    expectedSeq = (snapshot.seq ?? 0) + 1;
+    pendingResync = false;
+    haveInitSnapshot = true;
     lastKnownPlayers = snapshot.players ?? lastKnownPlayers;
     if (selectedHeroEntityId != null && !clientWorld.entities.has(selectedHeroEntityId)) {
       selectedHeroEntityId = null;
     }
-    if (firstSnapshot) {
-      terrainManager.buildFromWorld(clientWorld);
-      centerOnFirstHero();
-    }
+    terrainManager.buildFromWorld(clientWorld);
+    centerOnFirstHero();
     rerender();
   }
 
+  function ingestDelta(message) {
+    if (mode === 'host') return;
+    if (!haveInitSnapshot) { requestResync('delta before snapshot'); return; }
+    if (message.seq !== expectedSeq) {
+      requestResync('seq gap: expected ' + expectedSeq + ', got ' + message.seq);
+      return;
+    }
+    applyChangeOps(clientWorld, message.ops ?? []);
+    expectedSeq++;
+    rerender();
+  }
+
+  function ingestStateHash(message) {
+    if (mode === 'host') return;
+    if (!haveInitSnapshot) return;
+    // A state_hash matches the seq of the delta that produced it. If we
+    // applied that delta already, our hash should match the host's.
+    if (message.seq !== expectedSeq - 1) {
+      // We're either behind or ahead of the host's hash — request resync.
+      requestResync('hash seq mismatch: expected ' + (expectedSeq - 1) + ', got ' + message.seq);
+      return;
+    }
+    const localHash = hashWorld(clientWorld);
+    if (localHash !== message.hash) {
+      console.warn('[client] hash mismatch at seq ' + message.seq + '; local=' + localHash.toString(16) + ' host=' + message.hash.toString(16));
+      requestResync('hash mismatch');
+    }
+  }
+
+  function ingestPlayersChanged(message) {
+    if (mode === 'host') return;
+    lastKnownPlayers = message.players ?? lastKnownPlayers;
+    rerender();
+  }
+
+  function requestResync(reason) {
+    if (pendingResync) return;
+    pendingResync = true;
+    console.warn('[client] requesting resync:', reason);
+    net.sendAction?.({ name: 'resync_request' });
+  }
+
+  // Top-level dispatch — called by main.js when a net message arrives.
+  function ingestMessage(message) {
+    if (!message || typeof message !== 'object') return;
+    switch (message.type) {
+      case MESSAGE_KINDS.INIT_SNAPSHOT:   return ingestInitSnapshot(message.snapshot);
+      case MESSAGE_KINDS.DELTA:           return ingestDelta(message);
+      case MESSAGE_KINDS.STATE_HASH:      return ingestStateHash(message);
+      case MESSAGE_KINDS.PLAYERS_CHANGED: return ingestPlayersChanged(message);
+      default:
+        console.warn('[client] unknown message type:', message.type);
+    }
+  }
+
+  // For the host, broadcasts come *from* GameRoom and pass through net.
+  // Hook the outgoing path so the host's own renderer re-syncs after each
+  // state change.
   if (mode === 'host') {
-    // After the constructor finished, hook the broadcast so post-startup
-    // snapshots also trigger a host-side rerender.
     const originalBroadcast = net.broadcast;
     net.broadcast = (message) => {
-      if (message?.type === 'snapshot') rerender();
+      if (message?.type === MESSAGE_KINDS.DELTA || message?.type === MESSAGE_KINDS.PLAYERS_CHANGED) rerender();
       originalBroadcast?.(message);
     };
   }
@@ -265,9 +360,21 @@ export function startGameSession({
     gameRoom.handleAction(fromPlayerId, action);
   }
 
+  function announceClientConnected(peerId, name) {
+    if (mode !== 'host' || !gameRoom) return;
+    gameRoom.addPlayer(peerId, name);
+    gameRoom.sendInitSnapshotTo(peerId);
+  }
+  function announceClientDisconnected(peerId) {
+    if (mode !== 'host' || !gameRoom) return;
+    gameRoom.markPlayerDisconnected(peerId);
+  }
+
   return {
-    ingestSnapshot,
+    ingestMessage,
     handleClientAction,
+    announceClientConnected,
+    announceClientDisconnected,
     rerender,
     getMissingAssetsMarkdown: () =>
       formatMissingAssetsMarkdown(assets.getMissingAssets(), declarationListFor(viewerRegistry(), assets)),
@@ -276,7 +383,6 @@ export function startGameSession({
 
 function rebuildPathCosts(world, registry, startPosition, rawSteps) {
   const tileStore = world.componentStores.get('Tile');
-  // Index built lazily — pathfinding may have already cached one on the world.
   let index = world._tileIndex;
   if (!index || world._tileIndexRegistryRef !== registry) {
     index = new Map();

@@ -3,28 +3,25 @@
 
 import { HostNet, ClientNet } from './net.js';
 import { startGameSession } from './game/bootstrap.js';
+import { listSaves, loadSave, deleteSave } from './game/persistence.js';
+import { MESSAGE_KINDS } from './game/protocol.js';
 
 const PLAYER_COLORS = ['#c81428', '#1a4a8a', '#1a8a50', '#d4a834', '#6a3aa8', '#c46a14'];
 
 let mode = null;       // 'host' | 'client'
 let host = null;       // HostNet
 let client = null;     // ClientNet
-let myId = null;       // our peer id (host id if mode==='host')
+let myId = null;
 let myName = 'Commander';
-let roomCode = null;   // host's peer id (for clients) or own id (for host)
+let roomCode = null;
 
-// Authoritative lobby state — only the host mutates this; clients receive
-// snapshots over the wire. Game logic lives elsewhere (added later).
 let lobby = {
-  players: [],   // [{ id, name }]
+  players: [],
   started: false,
 };
-
-// Active game session created when the host starts or a client gets its first
-// snapshot. Has methods like ingestSnapshot(snapshot).
 let gameSession = null;
+let pendingSaveSnapshot = null;   // set when the host picks a save before clicking Start
 
-// ── Elements ────────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 
 // ── Saved name ──────────────────────────────────────────────────────────────
@@ -36,9 +33,6 @@ const $ = (id) => document.getElementById(id);
 }
 
 // ── URL ?room= picks the lobby mode ─────────────────────────────────────────
-// Arrived via a join link → show only the Join section.
-// Fresh visit → show only the Host section (with a hidden code-paste fallback
-// surfaced via a tiny "have a code?" toggle below the host button).
 {
   const params = new URLSearchParams(window.location.search);
   const incomingRoom = params.get('room');
@@ -53,7 +47,8 @@ const $ = (id) => document.getElementById(id);
 }
 
 // ── Lobby buttons ───────────────────────────────────────────────────────────
-$('host-btn').addEventListener('click', startHost);
+$('host-btn').addEventListener('click', () => { pendingSaveSnapshot = null; startHost(); });
+$('host-load-btn').addEventListener('click', toggleSavedGamesList);
 $('join-btn').addEventListener('click', startClient);
 $('start-btn').addEventListener('click', () => {
   if (mode !== 'host') return;
@@ -69,7 +64,65 @@ $('copy-code').addEventListener('click', () => {
   btn.textContent = 'Copied!';
   setTimeout(() => { btn.textContent = prev; }, 1500);
 });
-$('btn-leave')?.addEventListener('click', () => location.reload());
+
+function toggleSavedGamesList() {
+  const container = $('saved-games');
+  if (!container.classList.contains('hidden')) {
+    container.classList.add('hidden');
+    return;
+  }
+  renderSavedGamesList();
+  container.classList.remove('hidden');
+}
+
+function renderSavedGamesList() {
+  const container = $('saved-games');
+  container.innerHTML = '';
+  const saves = listSaves();
+  if (saves.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No saved games yet.';
+    container.appendChild(empty);
+    return;
+  }
+  for (const meta of saves) {
+    const row = document.createElement('div');
+    row.className = 'save-row';
+    const date = new Date(meta.savedAt);
+    const dateStr = date.toLocaleString();
+    const playerNames = (meta.players ?? []).map(p => p.name).join(', ');
+    row.innerHTML = `
+      <div class="meta">
+        <span class="label">${escapeHtml(meta.label ?? 'Game')}</span>
+        <span class="sub">${dateStr} · ${escapeHtml(playerNames)} · Day ${meta.turnNumber ?? 1}</span>
+      </div>
+    `;
+    row.addEventListener('click', () => beginHostFromSave(meta.id));
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'delete';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (!window.confirm('Delete this saved game?')) return;
+      deleteSave(meta.id);
+      renderSavedGamesList();
+    });
+    row.appendChild(deleteBtn);
+    container.appendChild(row);
+  }
+}
+
+async function beginHostFromSave(saveId) {
+  const saved = loadSave(saveId);
+  if (!saved) {
+    setStatus('Could not read that save.');
+    return;
+  }
+  pendingSaveSnapshot = saved.snapshot;
+  setStatus('Resuming "' + (saved.meta?.label ?? 'game') + '"…');
+  await startHost();
+}
 
 // ── Net bootstrap ───────────────────────────────────────────────────────────
 async function startHost() {
@@ -84,27 +137,57 @@ async function startHost() {
     return;
   }
   roomCode = myId;
-  lobby.players = [{ id: myId, name: myName }];
+
+  if (pendingSaveSnapshot) {
+    // Seed lobby with the snapshot's player roster — disconnected by default
+    // until peers reconnect by name.
+    lobby.players = (pendingSaveSnapshot.players ?? []).map(p => ({
+      id: p.playerId,
+      name: p.name,
+      connected: false,
+    }));
+    // Add the host themselves if not in the save (they'd usually be — match
+    // by name, swap id; otherwise prepend).
+    const myMatch = lobby.players.find(p => p.name === myName && !p.connected);
+    if (myMatch) {
+      myMatch.id = myId;
+      myMatch.connected = true;
+    } else {
+      lobby.players.unshift({ id: myId, name: myName, connected: true });
+    }
+  } else {
+    lobby.players = [{ id: myId, name: myName, connected: true }];
+  }
 
   host.on('connect', (peerId) => {
-    // Send current lobby snapshot to the newly-connected client; they will
-    // register themselves with a 'join' action that includes their name.
     host.sendTo(peerId, { type: 'lobby', lobby });
+    // If the game is already running, tell bootstrap to register this peer
+    // and ship them an init snapshot. We only know the name once they send
+    // their 'join' action, so init_snapshot follows that.
   });
   host.on('disconnect', (peerId) => {
-    lobby.players = lobby.players.filter(p => p.id !== peerId);
+    const slot = lobby.players.find(p => p.id === peerId);
+    if (slot) slot.connected = false;
     broadcastLobby();
     renderWaiting();
+    gameSession?.announceClientDisconnected?.(peerId);
   });
   host.on('action', (fromId, data) => {
     if (!data || typeof data !== 'object') return;
     if (data.type === 'join') {
       const name = String(data.name || 'Player').slice(0, 16);
-      if (!lobby.players.some(p => p.id === fromId)) {
-        lobby.players.push({ id: fromId, name });
-        broadcastLobby();
-        renderWaiting();
+      // Returning player? Match by name + disconnected slot; rebind id.
+      const reusable = lobby.players.find(p => !p.connected && p.name === name);
+      if (reusable) {
+        reusable.id = fromId;
+        reusable.connected = true;
+      } else if (!lobby.players.some(p => p.id === fromId)) {
+        lobby.players.push({ id: fromId, name, connected: true });
       }
+      broadcastLobby();
+      renderWaiting();
+      // If the game is already running, hand the client an init snapshot.
+      gameSession?.announceClientConnected?.(fromId, name);
       return;
     }
     if (data.type === 'action') {
@@ -133,14 +216,13 @@ async function startClient() {
     if (!data || typeof data !== 'object') return;
     if (data.type === 'lobby') {
       lobby = data.lobby;
-      if (lobby.started) startClientSession();
+      if (lobby.started && !gameSession) startClientSession();
       else renderWaiting();
       return;
     }
-    if (data.type === 'snapshot') {
-      if (!gameSession) startClientSession();
-      gameSession.ingestSnapshot(data.snapshot);
-    }
+    // Anything else is wire-protocol traffic for an active game.
+    if (!gameSession) startClientSession();
+    gameSession.ingestMessage(data);
   });
   client.on('close', () => setStatus('Disconnected from host.'));
   client.on('error', (err) => setStatus('Net: ' + msg(err)));
@@ -167,21 +249,24 @@ function renderWaiting() {
   $('room-code').textContent = roomUrl(roomCode);
   const list = $('player-list');
   list.innerHTML = '';
-  lobby.players.forEach((p, i) => {
+  lobby.players.forEach((player, index) => {
     const li = document.createElement('li');
-    const color = PLAYER_COLORS[i % PLAYER_COLORS.length];
-    const tag = p.id === roomCode && mode === 'host' ? ' · Host'
-              : (mode === 'client' && i === 0 ? ' · Host' : '');
-    const you = p.id === myId ? ' (you)' : '';
+    if (player.connected === false) li.classList.add('disconnected');
+    const color = PLAYER_COLORS[index % PLAYER_COLORS.length];
+    const tag = player.id === roomCode && mode === 'host' ? ' · Host'
+              : (mode === 'client' && index === 0 ? ' · Host' : '');
+    const you = player.id === myId ? ' (you)' : '';
     li.innerHTML = `<span class="player-dot" style="background:${color}"></span>
-                    <strong>${escapeHtml(p.name)}</strong>${you}
+                    <strong>${escapeHtml(player.name)}</strong>${you}
                     <span class="meta">${tag}</span>`;
     list.appendChild(li);
   });
   $('host-controls').style.display = mode === 'host' ? '' : 'none';
-  $('start-btn').disabled = lobby.players.length < 2;
+  const connectedCount = lobby.players.filter(p => p.connected !== false).length;
+  $('start-btn').disabled = connectedCount < 2 && !pendingSaveSnapshot;
   $('waiting-tag').textContent = mode === 'host'
-    ? (lobby.players.length < 2 ? 'Need at least 2 players to start.' : 'Start when everyone is in.')
+    ? (pendingSaveSnapshot ? 'Resume the saved game whenever you\'re ready.'
+        : (connectedCount < 2 ? 'Need at least 2 players to start.' : 'Start when everyone is in.'))
     : 'Waiting for the host to start the game…';
 }
 
@@ -194,7 +279,6 @@ function startHostSession() {
   show('game-ui');
   const canvas = $('board');
   const hudRoot = $('game-ui');
-  // Translate net-layer player shape ({id, name}) → game-layer shape ({playerId, name}).
   const players = lobby.players.map(p => ({ playerId: p.id, name: p.name }));
   gameSession = startGameSession({
     mode: 'host',
@@ -202,12 +286,20 @@ function startHostSession() {
     hudRoot,
     myPlayerId: myId,
     players,
+    loadFromSnapshot: pendingSaveSnapshot,
     net: {
       broadcast: (message) => host?.broadcast(message),
-      sendAction: () => {}, // unused on host
+      sendTo: (peerId, message) => host?.sendTo(peerId, message),
+      sendAction: () => {},
     },
     onLeave: () => location.reload(),
   });
+  // For peers already in the room when the host clicks Start: send each an init snapshot.
+  for (const player of lobby.players) {
+    if (player.id === myId) continue;
+    if (player.connected === false) continue;
+    gameSession.announceClientConnected(player.id, player.name);
+  }
 }
 
 function startClientSession() {
@@ -223,6 +315,7 @@ function startClientSession() {
     players,
     net: {
       broadcast: () => {},
+      sendTo: () => {},
       sendAction: (action) => client?.send({ type: 'action', action }),
     },
     onLeave: () => location.reload(),
@@ -250,7 +343,6 @@ function roomUrl(code) {
   if (!code) return '';
   const u = new URL(window.location.href);
   u.searchParams.set('room', code);
-  // Strip hash and any other query params we didn't set.
   u.hash = '';
   return u.toString();
 }
