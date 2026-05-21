@@ -15,6 +15,7 @@ import {
   registerTerrain,
   registerPrefab,
   registerHero,
+  registerActionType,
   declareAssetReference,
 } from '../../game/ecs/registry.js';
 
@@ -24,7 +25,13 @@ export default {
   name: MODULE_NAME,
   depends: [],
   register({ registry, log }) {
-    log('registering terrains, prefabs, and heroes');
+    log('registering terrains, prefabs, heroes, and action types');
+
+    // ── Action types ────────────────────────────────────────────────────
+    // The bootstrap hover layer resolves Actionable.actionTypeId through
+    // these so per-entity components only carry the id, not the strings.
+    registerActionType(registry, { id: 'base/take',  icon: '🫳', label: 'Take' });
+    registerActionType(registry, { id: 'base/visit', icon: '🚩', label: 'Visit' });
 
     // ── Terrain definitions ─────────────────────────────────────────────
     registerTerrain(registry, {

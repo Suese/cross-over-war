@@ -12,7 +12,7 @@
 // each handler. Persistence to localStorage runs after every delta.
 
 import {
-  createWorld, createEntity, addComponent, getComponent, getWorldState,
+  createWorld, createEntity, addComponent, getComponent, hasComponent, getWorldState,
   forEachEntityWith, setChangeRecording, consumePendingChanges,
   setComponentTracked, patchComponentTracked, createTrackedEntity,
   destroyTrackedEntity,
@@ -391,46 +391,31 @@ export class GameRoom {
       consumedPath.push({ q: next.q, r: next.r });
       stepsRemaining.shift();
 
-      // Did we just step onto a collectable? Visit, consume, and halt.
-      // Heroes stop on the tile of the thing they pick up so the player has
-      // time to see what happened — matches HoMM3.
-      const collectableEntityId = findCollectableAt(this.world, next.q, next.r);
-      if (collectableEntityId != null) {
-        const collectable = getComponent(this.world, collectableEntityId, 'Collectable');
-        const mapObject = getComponent(this.world, collectableEntityId, 'MapObject');
-        const type = mapObject ? this.registry.mapObjectTypes.get(mapObject.typeId) : null;
-        events.push({
-          type: 'collectable_visited',
-          playerId,
-          heroEntityId,
-          collectableEntityId,
-          typeId: mapObject?.typeId ?? null,
-          objectName: type?.name ?? null,
-          message: collectable?.message ?? 'You find nothing.',
-        });
-        destroyTrackedEntity(this.world, collectableEntityId);
-        break;
-      }
-
-      // Did we just step onto a point of interest? Visit, halt, but persist
-      // — POIs can be revisited later.
-      const poiEntityId = findPointOfInterestAt(this.world, next.q, next.r);
-      if (poiEntityId != null) {
-        const poi = getComponent(this.world, poiEntityId, 'PointOfInterest');
-        const mapObject = getComponent(this.world, poiEntityId, 'MapObject');
+      // Did we just step onto something visitable? One check, regardless of
+      // whether the entity is a one-shot collectable or a persistent POI —
+      // those used to be separate components, but their only real
+      // difference is "destroy after". That's now its own atomic tag
+      // (ConsumedOnVisit), so a tile can't accidentally be both.
+      const visitableEntityId = findVisitableAt(this.world, next.q, next.r);
+      if (visitableEntityId != null) {
+        const visitable = getComponent(this.world, visitableEntityId, 'Visitable');
+        const mapObject = getComponent(this.world, visitableEntityId, 'MapObject');
         const type = mapObject ? this.registry.mapObjectTypes.get(mapObject.typeId) : null;
         const heroComponent = getComponent(this.world, heroEntityId, 'Hero');
-        const rawMessage = poi?.message ?? '';
+        const rawMessage = visitable?.message ?? '';
         const formattedMessage = rawMessage.replace(/\{heroName\}/g, heroComponent?.name ?? 'hero');
+        const consumed = hasComponent(this.world, visitableEntityId, 'ConsumedOnVisit');
         events.push({
-          type: 'point_of_interest_visited',
+          type: 'entity_visited',
           playerId,
           heroEntityId,
-          pointOfInterestEntityId: poiEntityId,
+          visitedEntityId: visitableEntityId,
           typeId: mapObject?.typeId ?? null,
           objectName: type?.name ?? null,
           message: formattedMessage,
+          consumed,
         });
+        if (consumed) destroyTrackedEntity(this.world, visitableEntityId);
         break;
       }
     }
@@ -565,21 +550,12 @@ export class GameRoom {
   }
 }
 
-// Find the entity id of any Collectable sitting on a given hex. Returns null
-// if nothing is there. Linear scan — fine since collectable + POI populations
-// are small relative to the tile count.
-function findCollectableAt(world, q, r) {
+// Find the entity id of any Visitable sitting on a given hex. Returns null
+// if nothing is there. Linear scan — fine since the visitable population is
+// small relative to the tile count.
+function findVisitableAt(world, q, r) {
   let result = null;
-  forEachEntityWith(world, ['Collectable', 'Position'], (entityId, _collectable, position) => {
-    if (result != null) return;
-    if (position.q === q && position.r === r) result = entityId;
-  });
-  return result;
-}
-
-function findPointOfInterestAt(world, q, r) {
-  let result = null;
-  forEachEntityWith(world, ['PointOfInterest', 'Position'], (entityId, _poi, position) => {
+  forEachEntityWith(world, ['Visitable', 'Position'], (entityId, _visitable, position) => {
     if (result != null) return;
     if (position.q === q && position.r === r) result = entityId;
   });

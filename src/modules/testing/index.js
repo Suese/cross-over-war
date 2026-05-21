@@ -79,9 +79,14 @@ export default {
         r: params.r ?? 0,
       });
       addComponent(world, entityId, 'MapObject', { typeId: CAMPFIRE_TYPE_ID });
-      addComponent(world, entityId, 'Collectable', {
+      // Visitable + ConsumedOnVisit = one-shot pickup: fires entity_visited
+      // on step, entity is destroyed afterwards.
+      addComponent(world, entityId, 'Visitable', {
         message: params.message ?? CAMPFIRE_DEFAULT_MESSAGE,
       });
+      addComponent(world, entityId, 'ConsumedOnVisit', {});
+      // Hover hint — references a registered action type (icon + label).
+      addComponent(world, entityId, 'Actionable', { actionTypeId: 'base/take' });
       return entityId;
     });
 
@@ -129,9 +134,12 @@ export default {
       const poiId = createEntity(world);
       addComponent(world, poiId, 'Position', { q: anchorQ, r: anchorR });
       addComponent(world, poiId, 'MapObject', { typeId: HUT_TYPE_ID });
-      addComponent(world, poiId, 'PointOfInterest', {
+      // Visitable without ConsumedOnVisit — the hut persists and can be
+      // revisited any number of times.
+      addComponent(world, poiId, 'Visitable', {
         message: params.message ?? HUT_DEFAULT_MESSAGE,
       });
+      addComponent(world, poiId, 'Actionable', { actionTypeId: 'base/visit' });
 
       for (const offset of HUT_FOOTPRINT_OFFSETS) {
         const wallId = createEntity(world);

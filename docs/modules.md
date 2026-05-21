@@ -177,6 +177,25 @@ registerHero(registry, {
 `GameRoom._spawnPlayerHero` resolves an archetype and forwards
 `archetype.defaults` as the params to the prefab.
 
+### Action types — `registerActionType(registry, definition)`
+
+UI templates for the hover cursor. Every `Actionable` component on an
+entity references one of these by id, and the hover layer pulls the icon
++ label out of the registry to render the prompt. Per-instance memory is
+just a string id, so a map full of campfires doesn't ship the same `'🫳
+Take'` text fifty times.
+
+```js
+registerActionType(registry, {
+  id: 'base/take',     // namespace by module; required, unique
+  icon: '🫳',           // shown to the left of the label
+  label: 'Take',       // shown after the icon
+});
+```
+
+The base module ships `base/take` and `base/visit`; any module can declare
+more (e.g. `'inspect'`, `'speak'`, `'fight'`) without touching engine code.
+
 ### Map-object types — `registerMapObjectType(registry, definition)`
 
 A map-object type tells the renderer **how to draw** instances of a given
@@ -257,8 +276,9 @@ assembled by attaching atomic components to entities — usually inside a prefab
 |-------------------|-------------------------------------------------------------------------------------------------|
 | `Position`        | `{ q, r }` — the hex this entity sits on. Required for anything map-resident.                   |
 | `MapObject`       | `{ typeId }` — selects a registered map-object type for rendering + metadata.                   |
-| `Collectable`     | `{ message }` — visiting fires `collectable_visited` and **destroys** the entity.               |
-| `PointOfInterest` | `{ message }` — visiting fires `point_of_interest_visited`; entity **persists**. Supports `{heroName}` substitution. |
+| `Visitable`       | `{ message }` — stepping onto this entity's hex fires `entity_visited` and shows the message. Supports `{heroName}` substitution. |
+| `ConsumedOnVisit` | Empty tag — when combined with `Visitable`, the entity is destroyed after the visit fires (one-shot pickups). |
+| `Actionable`      | `{ actionTypeId }` — references a registered action type (`base/take`, `base/visit`, …) whose `{ icon, label }` the hover layer renders next to the cursor while flipping it to a pointer. Per-entity payload is just an id. |
 | `TerrainModifier` | `{ components }` — per-hex override of `PassableBy*`. Pathfinder uses modifier instead of base terrain. |
 | `BlocksMovement`  | Empty tag — the hex this entity is on is treated as occupied for pathfinding (heroes, big props). |
 | `Traverses<Mode>` | Empty tag (e.g. `TraversesLand`) — the mover can cross terrain that declares `PassableBy<Mode>`. |
@@ -270,13 +290,14 @@ assembled by attaching atomic components to entities — usually inside a prefab
 
 Attach components freely with `addComponent(world, entityId, 'YourName', data)`.
 Anything is allowed — there is no central type registry. Atomic over monolithic:
-prefer many small components (`Collectable`, `BlocksMovement`, `TraversesLand`)
-over one big bag of fields.
+prefer many small components (`Visitable`, `ConsumedOnVisit`, `BlocksMovement`,
+`TraversesLand`) over one big bag of fields.
 
 ### How to make a Collectable
 
 A one-shot pickup. Stepping onto its hex shows a message and removes the
-entity.
+entity. That's two behaviours, so it's two components: `Visitable` (the
+message-on-step part) plus `ConsumedOnVisit` (the destroy-after part).
 
 ```js
 // Prefab
@@ -284,7 +305,9 @@ registerPrefab(registry, 'mymod/wishing-coin', (world, params) => {
   const entityId = createEntity(world);
   addComponent(world, entityId, 'Position', { q: params.q, r: params.r });
   addComponent(world, entityId, 'MapObject', { typeId: 'mymod/wishing-coin' });
-  addComponent(world, entityId, 'Collectable', { message: 'You found a coin!' });
+  addComponent(world, entityId, 'Visitable', { message: 'You found a coin, {heroName}!' });
+  addComponent(world, entityId, 'ConsumedOnVisit', {});
+  addComponent(world, entityId, 'Actionable', { actionTypeId: 'base/take' });
   return entityId;
 });
 
@@ -298,34 +321,58 @@ registerMapObjectType(registry, {
 });
 ```
 
-On the host, `gameRoom._moveAlongPath` checks every step for a `Collectable`
-on the new tile; if it finds one, it halts the hero, emits a
-`collectable_visited` event, and calls `destroyTrackedEntity`. The client
-shows the Okay dialog once the hero's walk animation finishes.
+On the host, `gameRoom._moveAlongPath` checks every step for a `Visitable`
+on the new tile; if it finds one, it halts the hero, emits an
+`entity_visited` event, and (because `ConsumedOnVisit` is present)
+destroys the entity. The client shows the Okay dialog once the hero's
+walk animation finishes.
 
 ### How to make a Point of Interest
 
 Same as a Collectable, but the entity **persists** so the hero can revisit
-it. Use `PointOfInterest` instead of `Collectable`:
+it. Just leave off `ConsumedOnVisit`:
 
 ```js
-addComponent(world, entityId, 'PointOfInterest', {
+addComponent(world, entityId, 'Visitable', {
   message: 'Welcome to the well, {heroName}. Make a wish.',
 });
+addComponent(world, entityId, 'Actionable', { actionTypeId: 'base/visit' });
 ```
 
 `{heroName}` substitution happens host-side at visit time, so the wire
-payload already contains the formatted text. The hero halts on the POI's
-tile (same as a Collectable) but the entity stays in the world for next
-time.
+payload already contains the formatted text. The hero halts on the
+visitable tile and the entity stays in the world for next time.
+
+A tile can never accidentally be both a collectable and a POI — there's
+only one `Visitable` per entity, and the consumption behaviour is a
+separate, opt-in tag.
+
+### How to make a Map Object actionable (cursor + label)
+
+Attach `Actionable { actionTypeId }` to anything you want the hover layer
+to advertise as interactable, referencing a registered action type:
+
+```js
+// in your module's register():
+registerActionType(registry, { id: 'mymod/trade', icon: '🪙', label: 'Trade' });
+
+// in your prefab:
+addComponent(world, entityId, 'Actionable', { actionTypeId: 'mymod/trade' });
+```
+
+The hover layer resolves the id through the registry, renders the icon +
+label next to the cursor, and switches the canvas cursor to a pointer. It
+doesn't look at `Visitable` or any other behaviour component — the UI hint
+and the behaviour are independent. A non-visitable map object can still
+be marked Actionable (a sign you inspect via right-click, say) and vice
+versa.
 
 ### How to make a Map Object (no visit behaviour)
 
-A `MapObject + Position` entity with no `Collectable` or `PointOfInterest`
-component is just decoration — it renders, it shows up in the right-click
-info panel, but stepping onto its hex does nothing special. Add
-`BlocksMovement` if you want a static obstacle (boulder, ruin) heroes
-cannot pass through.
+A `MapObject + Position` entity with no `Visitable` component is just
+decoration — it renders, it shows up in the right-click info panel, but
+stepping onto its hex does nothing special. Add `BlocksMovement` if you
+want a static obstacle (boulder, ruin) heroes cannot pass through.
 
 ### How to make a Terrain Modifier
 
@@ -357,16 +404,19 @@ Prefabs are not 1:1 with single entities. A prefab can stamp out a whole
 engine builds "buildings" without needing a `Building` concept.
 
 The Mushroom Hut prefab in `src/modules/testing/` is the worked example:
-one POI entity at the anchor (carries `MapObject + Position +
-PointOfInterest` and the visible mesh) plus four wall entities
-(`Position + TerrainModifier`). The hut emerges from the atoms; the
-engine has no idea what a "Mushroom Hut" is.
+one anchor entity (carries `MapObject + Position + Visitable + Actionable`
+and the visible mesh) plus four wall entities (`Position +
+TerrainModifier`). The hut emerges from the atoms; the engine has no idea
+what a "Mushroom Hut" is.
 
 Anything can go in a prefab, but on the main map the practical mix is
 some combination of:
 
 - **Rendering** — `MapObject { typeId }` on an anchor entity.
-- **Visit behaviour** — `Collectable` or `PointOfInterest` on the anchor.
+- **Visit behaviour** — `Visitable` on the anchor (+ `ConsumedOnVisit` to
+  make it a one-shot pickup).
+- **UI hint** — `Actionable { actionTypeId }` on the anchor so the hover
+  layer shows the cursor prompt.
 - **Passability changes** — `TerrainModifier` on non-anchor footprint hexes;
   `BlocksMovement` on the anchor if heroes shouldn't be able to stand on it.
 - **Visible structure** — the type's `buildMesh` returns a `THREE.Group`
@@ -468,13 +518,14 @@ export default {
       const anchorQ = params.q ?? 0;
       const anchorR = params.r ?? 0;
 
-      // POI / anchor: visible mesh + visit message.
+      // POI / anchor: visible mesh + visit message + hover label.
       const poiId = createEntity(world);
       addComponent(world, poiId, 'Position', { q: anchorQ, r: anchorR });
       addComponent(world, poiId, 'MapObject', { typeId: TYPE_ID });
-      addComponent(world, poiId, 'PointOfInterest', {
+      addComponent(world, poiId, 'Visitable', {
         message: 'The wizard\'s door is locked, {heroName}. Try again another day.',
       });
+      addComponent(world, poiId, 'Actionable', { actionTypeId: 'base/visit' });
 
       // Walls — no rendering, no visit. Just passability override.
       for (const offset of WALL_OFFSETS) {
@@ -598,7 +649,8 @@ will refuse a path that tries to walk through the walls.
 | Stamp behaviour  | `registerPrefab` (anchor POI + wall entities, all wired in one call)        |
 | Placement        | `registerWorldSpawner` (footprint validation, claim hexes via `occupiedHexes`) |
 | Rendering        | `buildTowerMesh()` returning a `THREE.Group` shifted into the cove          |
-| Visit behaviour  | `PointOfInterest` component on the anchor — engine handles the rest         |
+| Visit behaviour  | `Visitable` component on the anchor — engine fires the visit event         |
+| Hover hint       | `Actionable` on the anchor — flips cursor to pointer + shows the label     |
 | Passability      | `TerrainModifier` on each wall hex; pathfinder consults `modifier ?? terrain` |
 
 No engine files were edited. Every piece is opt-in atomic component data

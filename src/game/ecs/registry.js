@@ -1,5 +1,5 @@
 // Game registry. Modules call into this during their register() pass to
-// declare terrains, prefabs, hero archetypes, point-of-interest types, etc.
+// declare terrains, prefabs, hero archetypes, map-object types, etc.
 //
 // The registry deliberately stays dumb — it just holds named definitions.
 // Systems and game code look things up by id.
@@ -10,8 +10,8 @@ export function createRegistry() {
     terrains: new Map(),    // id → definition
     prefabs: new Map(),     // id → spawn function (world, params) → entityId
     heroes: new Map(),      // id → hero archetype { name, prefabId, stats... }
-    pointOfInterestTypes: new Map(),  // id → { name, prefabId, onVisit(world, hero, target) }
-    mapObjectTypes: new Map(),        // id → { name, prefabId, buildMesh, onVisit? }
+    mapObjectTypes: new Map(),  // id → { name, prefabId, buildMesh, onVisit? }
+    actionTypes: new Map(),     // id → { icon, label } — UI templates referenced by the Actionable component
     worldSpawners: [],      // [(context) => void] — invoked once after map-gen + hero placement
     assetReferences: [],    // [{ moduleName, kind, id, path }] — for audit
   };
@@ -51,14 +51,25 @@ export function registerHero(registry, definition) {
   registry.heroes.set(definition.id, definition);
 }
 
-export function registerPointOfInterestType(registry, definition) {
-  if (!definition.id) throw new Error('registerPointOfInterestType: id required');
-  registry.pointOfInterestTypes.set(definition.id, definition);
-}
-
 export function registerMapObjectType(registry, definition) {
   if (!definition.id) throw new Error('registerMapObjectType: id required');
   registry.mapObjectTypes.set(definition.id, definition);
+}
+
+// Register a UI action template — icon + label paired with an id that the
+// Actionable component on entities references. Lets modules introduce new
+// hover-prompt kinds ('base/take', 'mymod/inspect', …) without bloating the
+// per-instance Actionable payload with duplicate strings.
+export function registerActionType(registry, definition) {
+  if (!definition.id) throw new Error('registerActionType: id required');
+  if (registry.actionTypes.has(definition.id)) {
+    throw new Error('action type already registered: ' + definition.id);
+  }
+  registry.actionTypes.set(definition.id, definition);
+}
+
+export function getActionType(registry, actionTypeId) {
+  return registry.actionTypes.get(actionTypeId) ?? null;
 }
 
 // Register a function that scatters entities across the freshly-generated

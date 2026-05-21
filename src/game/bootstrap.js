@@ -116,16 +116,18 @@ export function startGameSession({
   installPointerInput(renderer, {
     onHoverHex: (hex, event) => {
       const heroId = ensureSelectedHero();
-      if (!heroId) { cursorHud.hide(); return; }
+      if (!heroId) { cursorHud.hide(); setCanvasCursor(''); return; }
       const position = getComponent(viewerWorld(), heroId, 'Position');
       const movement = getComponent(viewerWorld(), heroId, 'Movement');
-      if (!position || !movement) { cursorHud.hide(); return; }
+      if (!position || !movement) { cursorHud.hide(); setCanvasCursor(''); return; }
       const exploredKeys = currentViewerExploredSet();
       // Quick gate: if the hex itself is unexplored, treat it as un-pathable
-      // without paying for a failed A* search.
+      // without paying for a failed A* search. Don't leak POI presence on
+      // unexplored hexes either — the cursor stays default.
       if (exploredKeys && !exploredKeys.has(hex.q + ',' + hex.r)) {
         cursorHud.show(event.clientX, event.clientY,
           '<span style="color:#ff8484">unknown</span>');
+        setCanvasCursor('');
         return;
       }
       const blockedKeys = collectBlockedKeysExcluding(viewerWorld(), heroId);
@@ -135,6 +137,7 @@ export function startGameSession({
       });
       if (!path || path.steps.length === 0) {
         cursorHud.show(event.clientX, event.clientY, '·');
+        setCanvasCursor('');
         return;
       }
       const totalCost = path.steps[path.steps.length - 1].cumulativeCost;
@@ -142,12 +145,31 @@ export function startGameSession({
       const dayWord = days === 1 ? 'day' : 'days';
       const reachable = totalCost <= movement.movementLeft;
       const colour = reachable ? '#7fffa8' : '#ff8484';
+      // If the hex carries an Actionable, look up its registered action
+      // type for the icon + label, then render the prompt and flip the
+      // cursor to a pointer. The hover layer doesn't know — or care —
+      // whether the underlying behaviour is a collectable, a POI, or some
+      // future kind of interaction; the entity carries an id, the registry
+      // owns the strings.
+      const actionable = findActionableAt(viewerWorld(), hex.q, hex.r);
+      const actionType = actionable
+        ? viewerRegistry().actionTypes.get(actionable.actionTypeId)
+        : null;
+      const actionLabel = actionType
+        ? ' <span style="opacity:0.7">·</span> <span style="color:#ffd964">'
+          + escapeHtml(actionType.icon ?? '')
+          + (actionType.icon && actionType.label ? ' ' : '')
+          + escapeHtml(actionType.label ?? '')
+          + '</span>'
+        : '';
+      setCanvasCursor(actionable ? 'pointer' : '');
       cursorHud.show(
         event.clientX,
         event.clientY,
         '<span style="color:' + colour + '">' + days + ' ' + dayWord + '</span>'
           + ' <span style="opacity:0.7">·</span> '
-          + totalCost + ' mp',
+          + totalCost + ' mp'
+          + actionLabel,
       );
     },
     onPlanPath: (hex) => {
@@ -506,6 +528,25 @@ export function startGameSession({
       .replaceAll('"', '&quot;');
   }
 
+  // Pulls the Actionable component data (icon + label) off whatever entity
+  // sits on (q, r). The UI doesn't need to know anything about visit
+  // semantics — anything with an Actionable shows up as interactable here.
+  function findActionableAt(world, q, r) {
+    let result = null;
+    forEachEntityWith(world, ['Actionable', 'Position'], (_entityId, actionable, position) => {
+      if (result != null) return;
+      if (position.q === q && position.r === r) result = actionable;
+    });
+    return result;
+  }
+
+  // Set the canvas cursor without re-writing the style attribute when it's
+  // already the value we want. Called on every hover; avoiding redundant
+  // writes keeps DevTools' Layout panel quieter and is otherwise cost-free.
+  function setCanvasCursor(value) {
+    if (canvas.style.cursor !== value) canvas.style.cursor = value;
+  }
+
   function findHeroAt(world, q, r) {
     let result = null;
     forEachEntityWith(world, ['Hero', 'Position'], (entityId, hero, position) => {
@@ -599,8 +640,8 @@ export function startGameSession({
 
   function queueAnimationsFromEvents(events) {
     // Track how long any subsequent popover should wait so it fires after
-    // the hero finishes walking onto the collectable. Events are emitted in
-    // play order by the host, so a collectable_visited event always follows
+    // the hero finishes walking onto the visited tile. Events are emitted
+    // in play order by the host, so an entity_visited event always follows
     // the hero_moved event that delivered the hero there.
     let pendingDelayMs = 0;
     for (const event of events) {
@@ -610,12 +651,7 @@ export function startGameSession({
         if (event.playerId === myPlayerId && Array.isArray(event.path)) {
           pendingDelayMs = Math.max(pendingDelayMs, event.path.length * ANIMATION_STEP_MS);
         }
-      } else if (event?.type === 'collectable_visited') {
-        if (event.playerId !== myPlayerId) continue;
-        const message = event.message ?? 'You find nothing.';
-        const title = event.objectName ?? null;
-        setTimeout(() => { showOkay(message, { title }); }, pendingDelayMs);
-      } else if (event?.type === 'point_of_interest_visited') {
+      } else if (event?.type === 'entity_visited') {
         if (event.playerId !== myPlayerId) continue;
         const message = event.message ?? '';
         const title = event.objectName ?? null;
