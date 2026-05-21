@@ -227,7 +227,50 @@ stepping onto its hex fire a `collectable_visited` event. The host's
 `gameRoom._moveAlongPath` halts the hero on the collectable's tile, destroys
 the entity, and broadcasts the event. The client receives the event and
 shows the message in an Okay dialog after the hero's walk animation finishes.
-The `campfires` module is the canonical example.
+The Camp Fire in `src/modules/testing/` is the canonical example.
+
+### Points of interest
+
+Add a `PointOfInterest { message }` component instead of `Collectable` when
+the object should **persist** after a visit — towns, shrines, mushroom huts,
+anything you can revisit. The visit logic is otherwise identical:
+`_moveAlongPath` halts the hero on the tile and broadcasts a
+`point_of_interest_visited` event. The host substitutes `{heroName}` in the
+message before broadcasting.
+
+### Terrain modifiers
+
+`TerrainModifier { components }` is a per-hex override that takes precedence
+over the underlying terrain's passability map at that hex. Used to make
+non-anchor hexes of a multi-hex structure impassable without disturbing the
+base map:
+
+```js
+addComponent(world, wallId, 'Position', { q: someQ, r: someR });
+addComponent(world, wallId, 'TerrainModifier', {
+  components: { PassableByAir: { cost: 1 } },
+});
+```
+
+The pathfinder calls `resolveTerrainCost(modifier ?? terrain, modes)` per
+candidate tile, so any modifier-carrying hex completely replaces the base
+terrain's `PassableBy*` entries for cost lookups. Modifiers are entities —
+they're part of the snapshot, ride the delta protocol, and can be created /
+destroyed like anything else. If you start mutating modifiers mid-game,
+call `invalidateTileIndex(world)` so the pathfinder rebuilds its cache.
+
+### Prefabs as composition
+
+Prefabs are not 1:1 with single entities. The Mushroom Hut prefab in
+`src/modules/testing/` is the canonical example of the composition pattern:
+a single prefab call stamps out a coordinated cluster — one POI entity
+(`MapObject + Position + PointOfInterest`) plus three wall entities
+(`Position + TerrainModifier`). The visible mesh sits on the POI; the walls
+have no mesh, only the terrain-passability override. Nothing in the engine
+knows the "Mushroom Hut" exists as a single concept — it's emergent from
+the atomic pieces a prefab assembled. Town, garrison, dragon-lair, etc.
+prefabs will all follow the same shape: rendering + visit + passability +
+whatever else, layered as separate components on the right entities.
 
 ### Asset references — `declareAssetReference(registry, reference)`
 
@@ -316,7 +359,9 @@ extend a base prefab, you should know what's already on it.
 | `BlocksMovement` | `base/hero`            | empty tag — any entity carrying it occupies its hex for pathfinding    |
 | `Traverses<Mode>`| `base/hero`            | empty tag (e.g. `TraversesLand`) — the mover can cross terrain that declares `PassableBy<Mode>` |
 | `MapObject`      | map-object prefabs     | `typeId` — selects the registered type for rendering and visit logic   |
-| `Collectable`    | collectable prefabs    | `message` — text shown in the Okay dialog when a hero visits the tile  |
+| `Collectable`    | collectable prefabs    | `message` — shown in the Okay dialog on visit; entity is destroyed     |
+| `PointOfInterest`| POI prefabs            | `message` — shown in the Okay dialog on visit; entity persists. Supports `{heroName}` substitution |
+| `TerrainModifier`| structure prefabs      | `components` — overrides the base terrain's `PassableBy*` for this hex |
 | `WorldState`     | `gameRoom.js`          | `turn`, `activePlayerId`, `fogByPlayer`, `playerSlots`, …              |
 
 Add your own components freely — `addComponent(world, entityId, 'YourName',

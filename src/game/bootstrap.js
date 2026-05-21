@@ -445,7 +445,8 @@ export function startGameSession({
     if (heroInfo) sections.push(buildHeroSection(heroInfo));
 
     const terrain = lookupTerrainAt(world, viewerRegistry(), hex.q, hex.r);
-    if (terrain) sections.push(buildTerrainSection(terrain));
+    const modifier = lookupModifierAt(world, hex.q, hex.r);
+    if (terrain || modifier) sections.push(buildTerrainSection(terrain, modifier));
 
     if (sections.length === 0) return plainLine('Nothing here.');
     return sections.join('<div style="height:8px"></div>');
@@ -462,8 +463,12 @@ export function startGameSession({
     return sectionTitle(hero.name ?? 'Hero', '#a8e6ff') + ownerLine + modesLine;
   }
 
-  function buildTerrainSection(terrain) {
-    const passable = listPassableModes(terrain);
+  function buildTerrainSection(terrain, modifier) {
+    // A TerrainModifier on the hex completely overrides the base terrain's
+    // passability — show the effective list, and label it so the player
+    // knows their grass tile is currently blocked by a structure.
+    const passabilityCarrier = modifier ?? terrain;
+    const passable = listPassableModes(passabilityCarrier);
     const traversalBody = passable.length
       ? '<div style="margin-top:2px">'
         + passable.map(entry =>
@@ -474,11 +479,12 @@ export function startGameSession({
           ).join('')
         + '</div>'
       : '<div style="color:#ff8484">Impassable</div>';
-    const description = terrain.description
+    const traversalLabel = modifier ? 'Traversal (modified):' : 'Traversal:';
+    const description = terrain?.description
       ? '<div style="opacity:0.8; margin-top:4px">' + escapeHtml(terrain.description) + '</div>'
       : '';
-    return sectionTitle(terrain.name ?? terrain.id, '#7fffa8')
-      + '<div>Traversal:</div>'
+    return sectionTitle(terrain?.name ?? terrain?.id ?? 'Terrain', '#7fffa8')
+      + '<div>' + traversalLabel + '</div>'
       + traversalBody
       + description;
   }
@@ -534,6 +540,20 @@ export function startGameSession({
       terrain = getTerrainFromRegistry(registry, tile.terrainId);
     });
     return terrain;
+  }
+
+  function lookupModifierAt(world, q, r) {
+    const cache = world._tileIndex;
+    if (cache) {
+      const hit = cache.get(q + ',' + r);
+      return hit?.modifier ?? null;
+    }
+    let result = null;
+    forEachEntityWith(world, ['TerrainModifier', 'Position'], (_id, modifier, position) => {
+      if (result) return;
+      if (position.q === q && position.r === r) result = modifier;
+    });
+    return result;
   }
 
   function getTerrainFromRegistry(registry, terrainId) {
@@ -595,6 +615,11 @@ export function startGameSession({
         const message = event.message ?? 'You find nothing.';
         const title = event.objectName ?? null;
         setTimeout(() => { showOkay(message, { title }); }, pendingDelayMs);
+      } else if (event?.type === 'point_of_interest_visited') {
+        if (event.playerId !== myPlayerId) continue;
+        const message = event.message ?? '';
+        const title = event.objectName ?? null;
+        setTimeout(() => { showOkay(message, { title }); }, pendingDelayMs);
       }
     }
   }
@@ -648,6 +673,10 @@ function rebuildPathCosts(world, registry, startPosition, rawSteps, traversalMod
         index.set(tile.q + ',' + tile.r, { tile, terrain });
       }
     }
+    forEachEntityWith(world, ['TerrainModifier', 'Position'], (_id, modifier, position) => {
+      const entry = index.get(position.q + ',' + position.r);
+      if (entry) entry.modifier = modifier;
+    });
     world._tileIndex = index;
     world._tileIndexRegistryRef = registry;
   }
@@ -657,7 +686,8 @@ function rebuildPathCosts(world, registry, startPosition, rawSteps, traversalMod
   const out = [];
   for (const step of rawSteps) {
     const lookup = index.get(step.q + ',' + step.r);
-    const cost = resolveTerrainCost(lookup?.terrain, modes);
+    const carrier = lookup?.modifier ?? lookup?.terrain;
+    const cost = resolveTerrainCost(carrier, modes);
     running += cost ?? 1;
     out.push({ q: step.q, r: step.r, cumulativeCost: running });
   }

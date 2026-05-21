@@ -381,7 +381,8 @@ export class GameRoom {
       // Re-checked each step in case the world state changed since planning.
       if (blockedKeys.has(nextKey)) break;
       const terrain = getTerrain(this.registry, this._terrainAt(next.q, next.r));
-      const cost = resolveTerrainCost(terrain, traversalModes);
+      const modifier = this._modifierAt(next.q, next.r);
+      const cost = resolveTerrainCost(modifier ?? terrain, traversalModes);
       if (cost == null) break;
       if (movement.movementLeft < cost) break;
       patchComponentTracked(this.world, heroEntityId, 'Movement', ['movementLeft'], movement.movementLeft - cost);
@@ -390,9 +391,9 @@ export class GameRoom {
       consumedPath.push({ q: next.q, r: next.r });
       stepsRemaining.shift();
 
-      // Did we just step onto a collectable? Visit and halt. Heroes always
-      // stop on the tile of the thing they pick up so the player has time to
-      // see what happened — matches HoMM3.
+      // Did we just step onto a collectable? Visit, consume, and halt.
+      // Heroes stop on the tile of the thing they pick up so the player has
+      // time to see what happened — matches HoMM3.
       const collectableEntityId = findCollectableAt(this.world, next.q, next.r);
       if (collectableEntityId != null) {
         const collectable = getComponent(this.world, collectableEntityId, 'Collectable');
@@ -408,6 +409,28 @@ export class GameRoom {
           message: collectable?.message ?? 'You find nothing.',
         });
         destroyTrackedEntity(this.world, collectableEntityId);
+        break;
+      }
+
+      // Did we just step onto a point of interest? Visit, halt, but persist
+      // — POIs can be revisited later.
+      const poiEntityId = findPointOfInterestAt(this.world, next.q, next.r);
+      if (poiEntityId != null) {
+        const poi = getComponent(this.world, poiEntityId, 'PointOfInterest');
+        const mapObject = getComponent(this.world, poiEntityId, 'MapObject');
+        const type = mapObject ? this.registry.mapObjectTypes.get(mapObject.typeId) : null;
+        const heroComponent = getComponent(this.world, heroEntityId, 'Hero');
+        const rawMessage = poi?.message ?? '';
+        const formattedMessage = rawMessage.replace(/\{heroName\}/g, heroComponent?.name ?? 'hero');
+        events.push({
+          type: 'point_of_interest_visited',
+          playerId,
+          heroEntityId,
+          pointOfInterestEntityId: poiEntityId,
+          typeId: mapObject?.typeId ?? null,
+          objectName: type?.name ?? null,
+          message: formattedMessage,
+        });
         break;
       }
     }
@@ -523,14 +546,40 @@ export class GameRoom {
     });
     return foundTerrain;
   }
+
+  // Returns the TerrainModifier component sitting on the given hex, or null.
+  // The cached tile index already has modifiers folded in once it's built;
+  // we fall back to a linear scan when called before the first findPath().
+  _modifierAt(q, r) {
+    const cache = this.world._tileIndex;
+    if (cache) {
+      const hit = cache.get(q + ',' + r);
+      return hit?.modifier ?? null;
+    }
+    let result = null;
+    forEachEntityWith(this.world, ['TerrainModifier', 'Position'], (_id, modifier, position) => {
+      if (result) return;
+      if (position.q === q && position.r === r) result = modifier;
+    });
+    return result;
+  }
 }
 
 // Find the entity id of any Collectable sitting on a given hex. Returns null
-// if nothing is there. Linear scan — fine since the campfire population is
-// small relative to the tile count.
+// if nothing is there. Linear scan — fine since collectable + POI populations
+// are small relative to the tile count.
 function findCollectableAt(world, q, r) {
   let result = null;
   forEachEntityWith(world, ['Collectable', 'Position'], (entityId, _collectable, position) => {
+    if (result != null) return;
+    if (position.q === q && position.r === r) result = entityId;
+  });
+  return result;
+}
+
+function findPointOfInterestAt(world, q, r) {
+  let result = null;
+  forEachEntityWith(world, ['PointOfInterest', 'Position'], (entityId, _poi, position) => {
     if (result != null) return;
     if (position.q === q && position.r === r) result = entityId;
   });

@@ -31,6 +31,14 @@ function getOrBuildTileIndex(world, registry) {
     if (!terrain) return;
     index.set(hexKey(tile.q, tile.r), { entityId, tile, terrain });
   });
+  // Layer TerrainModifier entities on top — each one overrides the base
+  // terrain's passability map at its hex. Built once on first findPath call
+  // after game start; if any code starts adding/removing modifiers mid-game
+  // it must call invalidateTileIndex() so this gets rebuilt.
+  forEachEntityWith(world, ['TerrainModifier', 'Position'], (_id, modifier, position) => {
+    const entry = index.get(hexKey(position.q, position.r));
+    if (entry) entry.modifier = modifier;
+  });
   world._tileIndex = index;
   world._tileIndexRegistryRef = registry;
   return index;
@@ -99,7 +107,8 @@ export function findPath(world, registry, start, goal, options = {}) {
   const tileIndex = getOrBuildTileIndex(world, registry);
   const goalKey = hexKey(goal.q, goal.r);
   const goalTile = tileIndex.get(goalKey);
-  if (!goalTile || resolveTerrainCost(goalTile.terrain, traversalModes) == null) return null;
+  const goalCarrier = goalTile?.modifier ?? goalTile?.terrain;
+  if (!goalCarrier || resolveTerrainCost(goalCarrier, traversalModes) == null) return null;
   if (blocked && blocked.has(goalKey)) return null;
 
   const explored = options.exploredKeys;
@@ -126,7 +135,7 @@ export function findPath(world, registry, start, goal, options = {}) {
       const nextKey = hexKey(nextQ, nextR);
       const nextTile = tileIndex.get(nextKey);
       if (!nextTile) continue;
-      const stepCost = resolveTerrainCost(nextTile.terrain, traversalModes);
+      const stepCost = resolveTerrainCost(nextTile.modifier ?? nextTile.terrain, traversalModes);
       if (stepCost == null) continue;
       if (explored && !explored.has(nextKey)) continue;
       if (blocked && blocked.has(nextKey)) continue;
