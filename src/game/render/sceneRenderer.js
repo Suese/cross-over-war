@@ -80,7 +80,11 @@ export function createSceneRenderer(canvas) {
   const objectMeshesByEntityId = new Map();
   let activePathOverlay = null;
 
-  function syncObjects(world, viewerPlayerId, registry, assets) {
+  function syncObjects(world, viewerPlayerId, registry, assets, options = {}) {
+    const heroAnimations = options.heroAnimations;
+    const fogOverride = options.fogOverride;
+    const nowMs = options.nowMs ?? performance.now();
+
     const seen = new Set();
     forEachEntityWith(world, ['Hero', 'Position'], (entityId, hero, position) => {
       seen.add(entityId);
@@ -92,11 +96,26 @@ export function createSceneRenderer(canvas) {
         objectGroup.add(mesh);
         objectMeshesByEntityId.set(entityId, mesh);
       }
-      setHeroPosition(mesh, position.q, position.r, HEX_SIZE);
 
-      const fog = viewerFog(world, viewerPlayerId);
-      const key = position.q + ',' + position.r;
-      const visible = !fog || fog.visible.has(key) || ownerPlayerId === viewerPlayerId;
+      // Position + facing come from the animation system when one is active.
+      const animation = heroAnimations ? heroAnimations.sample(entityId, nowMs) : null;
+      let displayQ = position.q;
+      let displayR = position.r;
+      if (animation) {
+        mesh.position.set(animation.x, 0, animation.z);
+        mesh.quaternion.copy(heroAnimations.quaternionForYaw(animation.yaw));
+        displayQ = animation.currentQ;
+        displayR = animation.currentR;
+      } else {
+        setHeroPosition(mesh, position.q, position.r, HEX_SIZE);
+        // Clear any leftover yaw from a previous animation.
+        mesh.quaternion.identity();
+      }
+
+      const fog = fogOverride ?? viewerFog(world, viewerPlayerId);
+      const key = displayQ + ',' + displayR;
+      const fogVisible = fog?.visibleKeys ?? fog?.visible;
+      const visible = !fog || fogVisible?.has(key) || ownerPlayerId === viewerPlayerId;
       mesh.visible = visible;
     });
     for (const [entityId, mesh] of objectMeshesByEntityId) {

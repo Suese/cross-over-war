@@ -60,25 +60,40 @@ export function buildHeroMesh(registry, assets, hero, ownerPlayerId) {
   const group = new Group();
   const colour = new Color(colourForPlayer(ownerPlayerId));
 
-  // Cube body (the explicit "no model" fallback).
+  // Cube body — elongated along +Z so a "nose" sticks out front. Once we
+  // rotate the group around Y to face the direction of movement, the
+  // elongation makes the facing direction visually obvious.
   const bodyMaterial = new MeshStandardMaterial({
     color: colour,
     roughness: 0.5,
     metalness: 0.15,
     emissive: colour.clone().multiplyScalar(0.05),
   });
-  const body = new Mesh(new BoxGeometry(0.7, 0.7, 0.7), bodyMaterial);
+  const body = new Mesh(new BoxGeometry(0.55, 0.7, 0.9), bodyMaterial);
   body.position.y = 0.55;
   body.castShadow = true;
-  body.receiveShadow = false;
   group.add(body);
 
-  // Smaller "head" cube so it doesn't look quite so featureless.
+  // Smaller "head" cube, slightly forward (+Z) so the front face reads as
+  // the leading edge.
   const head = new Mesh(new BoxGeometry(0.45, 0.45, 0.45), bodyMaterial.clone());
   head.material.color.copy(colour).multiplyScalar(1.2);
-  head.position.y = 1.15;
+  head.position.set(0, 1.15, 0.12);
   head.castShadow = true;
   group.add(head);
+
+  // Bright "nose" wedge sticking out of the front for an unambiguous facing
+  // indicator — tiny but visible at typical zoom.
+  const noseMaterial = new MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.4,
+    metalness: 0.1,
+    emissive: new Color(colour).multiplyScalar(0.4),
+  });
+  const nose = new Mesh(new BoxGeometry(0.18, 0.18, 0.22), noseMaterial);
+  nose.position.set(0, 0.55, 0.55);
+  nose.castShadow = true;
+  group.add(nose);
 
   // Name label above the head.
   const label = buildLabelSprite(hero?.name ?? 'Hero');

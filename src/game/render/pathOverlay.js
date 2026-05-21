@@ -9,24 +9,35 @@ import {
   Mesh,
   MeshBasicMaterial,
   ConeGeometry,
-  PlaneGeometry,
   CanvasTexture,
   SpriteMaterial,
   Sprite,
   Color,
+  Quaternion,
+  Vector3,
 } from 'three';
 import { hexToPixel } from '../map/hex.js';
 
 const ARROW_OFFSET_Y = 0.05;
+// The cone's tip points along its local +Y. We use that as the reference
+// vector when computing the quaternion to align the arrow with a path step.
+const CONE_DEFAULT_AXIS = new Vector3(0, 1, 0);
 
 function makeArrowMesh(colourHex) {
+  // We orient each arrow with a quaternion rather than Euler angles —
+  // setting rotation.x and rotation.z mixes through XYZ Euler order and
+  // mirrors the X component of the desired direction.
   const geometry = new ConeGeometry(0.18, 0.55, 8);
   const material = new MeshBasicMaterial({ color: new Color(colourHex), transparent: true, opacity: 0.95 });
-  const mesh = new Mesh(geometry, material);
-  // Cone defaults to point along +Y. Rotate so the tip points along +Z and
-  // we can yaw it to face the next step.
-  mesh.rotation.x = Math.PI / 2;
-  return mesh;
+  return new Mesh(geometry, material);
+}
+
+function orientAlong(mesh, directionX, directionZ) {
+  const direction = new Vector3(directionX, 0, directionZ);
+  if (direction.lengthSq() === 0) return;
+  direction.normalize();
+  const quaternion = new Quaternion().setFromUnitVectors(CONE_DEFAULT_AXIS, direction);
+  mesh.quaternion.copy(quaternion);
 }
 
 function makeXSprite(colourHex) {
@@ -42,10 +53,6 @@ function makeXSprite(colourHex) {
   const sprite = new Sprite(new SpriteMaterial({ map: texture, transparent: true }));
   sprite.scale.set(0.9, 0.9, 1);
   return sprite;
-}
-
-function yawTowards(fromPoint, toPoint) {
-  return Math.atan2(toPoint.x - fromPoint.x, toPoint.z - fromPoint.z);
 }
 
 // pathPlan: { startQ, startR, path: { steps: [...], costs: [...] },
@@ -67,7 +74,7 @@ export function buildPathOverlay(pathPlan, hexSize) {
     const colour = reachableThisTurn ? greenHex : redHex;
     const arrow = makeArrowMesh(colour);
     arrow.position.set(stepPoint.x, ARROW_OFFSET_Y, stepPoint.z);
-    arrow.rotation.z = yawTowards(previousPoint, stepPoint);
+    orientAlong(arrow, stepPoint.x - previousPoint.x, stepPoint.z - previousPoint.z);
     group.add(arrow);
     previousPoint = stepPoint;
   }

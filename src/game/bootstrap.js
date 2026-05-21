@@ -21,6 +21,7 @@ import { logMissingAssetsToConsole, formatMissingAssetsMarkdown } from './module
 import { GameRoom } from './gameRoom.js';
 import { createSceneRenderer } from './render/sceneRenderer.js';
 import { createTerrainInstanceManager } from './render/terrainInstances.js';
+import { createHeroAnimations } from './render/heroAnimations.js';
 import { installPointerInput } from './input/pointerInput.js';
 import { installCursorHud } from './input/cursorHud.js';
 import { installHudOverlay } from './ui/hudOverlay.js';
@@ -86,6 +87,7 @@ export function startGameSession({
     assets,
     hexSize: renderer.HEX_SIZE,
   });
+  const heroAnimations = createHeroAnimations(renderer.HEX_SIZE);
 
   if (mode === 'host') terrainManager.buildFromWorld(viewerWorld());
 
@@ -112,7 +114,15 @@ export function startGameSession({
       const position = getComponent(viewerWorld(), heroId, 'Position');
       const movement = getComponent(viewerWorld(), heroId, 'Movement');
       if (!position || !movement) { cursorHud.hide(); return; }
-      const path = findPath(viewerWorld(), viewerRegistry(), position, hex);
+      const exploredKeys = currentViewerExploredSet();
+      // Quick gate: if the hex itself is unexplored, treat it as un-pathable
+      // without paying for a failed A* search.
+      if (exploredKeys && !exploredKeys.has(hex.q + ',' + hex.r)) {
+        cursorHud.show(event.clientX, event.clientY,
+          '<span style="color:#ff8484">unknown</span>');
+        return;
+      }
+      const path = findPath(viewerWorld(), viewerRegistry(), position, hex, { exploredKeys });
       if (!path || path.steps.length === 0) {
         cursorHud.show(event.clientX, event.clientY, '·');
         return;
@@ -148,11 +158,23 @@ export function startGameSession({
   });
 
   // ── Render passes ───────────────────────────────────────────────────────
+  // rerender() runs on every state change (snapshot / delta). It rebuilds
+  // the path overlay + HUD and seeds the renderer with the latest fog. The
+  // per-frame loop below keeps the hero meshes in sync while an animation is
+  // playing back and re-uploads fog instance data only when the discrete
+  // animation step changes.
+  let lastFogTick = '';
+
   function rerender() {
     const world = viewerWorld();
     if (!world) return;
-    terrainManager.updateFogForViewer(world, myPlayerId);
-    renderer.syncObjects(world, myPlayerId, viewerRegistry(), assets);
+    const nowMs = performance.now();
+    const fogOverride = heroAnimations.fogOverrideFor(myPlayerId, nowMs);
+    terrainManager.updateFogForViewer(world, myPlayerId, fogOverride);
+    lastFogTick = heroAnimations.currentFogTick(myPlayerId, nowMs) ?? '';
+    renderer.syncObjects(world, myPlayerId, viewerRegistry(), assets, {
+      heroAnimations, fogOverride, nowMs,
+    });
 
     const heroId = ensureSelectedHero();
     if (heroId) {
@@ -179,6 +201,28 @@ export function startGameSession({
   }
 
   function loop() {
+    if (heroAnimations.hasActiveAnimation()) {
+      const world = viewerWorld();
+      if (world) {
+        const nowMs = performance.now();
+        const fogOverride = heroAnimations.fogOverrideFor(myPlayerId, nowMs);
+        // Hero mesh sync is cheap (a handful of entities).
+        renderer.syncObjects(world, myPlayerId, viewerRegistry(), assets, {
+          heroAnimations, fogOverride, nowMs,
+        });
+        // Fog re-upload is expensive — only run when the step boundary moves.
+        const tick = heroAnimations.currentFogTick(myPlayerId, nowMs) ?? '';
+        if (tick !== lastFogTick) {
+          terrainManager.updateFogForViewer(world, myPlayerId, fogOverride);
+          lastFogTick = tick;
+        }
+      }
+    } else if (lastFogTick !== '') {
+      // Animation just ended — fall back to the ECS fog state.
+      const world = viewerWorld();
+      if (world) terrainManager.updateFogForViewer(world, myPlayerId, null);
+      lastFogTick = '';
+    }
     renderer.render();
     requestAnimationFrame(loop);
   }
@@ -259,6 +303,7 @@ export function startGameSession({
     }
     applyChangeOps(clientWorld, message.ops ?? []);
     expectedSeq++;
+    queueAnimationsFromEvents(message.events ?? []);
     rerender();
   }
 
@@ -311,7 +356,12 @@ export function startGameSession({
   if (mode === 'host') {
     const originalBroadcast = net.broadcast;
     net.broadcast = (message) => {
-      if (message?.type === MESSAGE_KINDS.DELTA || message?.type === MESSAGE_KINDS.PLAYERS_CHANGED) rerender();
+      if (message?.type === MESSAGE_KINDS.DELTA) {
+        queueAnimationsFromEvents(message.events ?? []);
+        rerender();
+      } else if (message?.type === MESSAGE_KINDS.PLAYERS_CHANGED) {
+        rerender();
+      }
       originalBroadcast?.(message);
     };
   }
@@ -353,6 +403,27 @@ export function startGameSession({
   }
   function viewerRegistry() {
     return mode === 'host' ? gameRoom.registry : clientRegistry;
+  }
+
+  // Pathfinding helper: explored Set for the local viewer, drawn from
+  // whichever world this side owns.
+  function currentViewerExploredSet() {
+    const world = viewerWorld();
+    if (!world) return null;
+    const stateEntityId = world._worldStateEntity;
+    if (!stateEntityId) return null;
+    const store = world.componentStores.get('WorldState');
+    if (!store) return null;
+    const state = store.get(stateEntityId);
+    return state?.fogByPlayer?.[myPlayerId]?.explored ?? null;
+  }
+
+  function queueAnimationsFromEvents(events) {
+    for (const event of events) {
+      if (event?.type !== 'hero_moved') continue;
+      const hero = getComponent(viewerWorld(), event.heroEntityId, 'Hero');
+      heroAnimations.enqueueFromEvent(event, myPlayerId, hero);
+    }
   }
 
   function handleClientAction(fromPlayerId, action) {

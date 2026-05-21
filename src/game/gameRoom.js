@@ -271,15 +271,21 @@ export class GameRoom {
     if (!heroEntityId) return;
     const position = getComponent(this.world, heroEntityId, 'Position');
     const goal = { q: action.goalQ, r: action.goalR };
-    const path = findPath(this.world, this.registry, position, goal);
-    const stateEntity = heroEntityId;
+    const exploredKeys = this._playerExploredSet(playerId);
+    const path = findPath(this.world, this.registry, position, goal, { exploredKeys });
     if (path) {
-      patchComponentTracked(this.world, stateEntity, 'Movement', ['plannedPath'], { steps: path.steps });
+      patchComponentTracked(this.world, heroEntityId, 'Movement', ['plannedPath'], { steps: path.steps });
       events.push({ type: 'path_planned', heroEntityId, goal });
     } else {
-      patchComponentTracked(this.world, stateEntity, 'Movement', ['plannedPath'], null);
+      patchComponentTracked(this.world, heroEntityId, 'Movement', ['plannedPath'], null);
       events.push({ type: 'path_cleared', heroEntityId });
     }
+  }
+
+  _playerExploredSet(playerId) {
+    const stateEntityId = getWorldState(this.world);
+    const worldState = getComponent(this.world, stateEntityId, 'WorldState');
+    return worldState?.fogByPlayer?.[playerId]?.explored ?? null;
   }
 
   _clearPath(playerId, action, events) {
@@ -300,10 +306,13 @@ export class GameRoom {
 
     const fromQ = position.q;
     const fromR = position.r;
+    const exploredKeys = this._playerExploredSet(playerId);
     const stepsRemaining = plan.steps.slice();
-    let consumedSteps = 0;
+    const consumedPath = [];
     while (stepsRemaining.length > 0) {
       const next = stepsRemaining[0];
+      // Block movement into tiles the planner couldn't have seen.
+      if (exploredKeys && !exploredKeys.has(next.q + ',' + next.r)) break;
       const terrain = getTerrain(this.registry, this._terrainAt(next.q, next.r));
       if (!terrain || !terrain.walkable) break;
       const cost = terrain.movementCost;
@@ -311,21 +320,26 @@ export class GameRoom {
       patchComponentTracked(this.world, heroEntityId, 'Movement', ['movementLeft'], movement.movementLeft - cost);
       patchComponentTracked(this.world, heroEntityId, 'Position', ['q'], next.q);
       patchComponentTracked(this.world, heroEntityId, 'Position', ['r'], next.r);
+      consumedPath.push({ q: next.q, r: next.r });
       stepsRemaining.shift();
-      consumedSteps++;
     }
-    if (consumedSteps === 0) return;
+    if (consumedPath.length === 0) return;
     patchComponentTracked(this.world, heroEntityId, 'Movement', ['plannedPath'],
       stepsRemaining.length > 0 ? { steps: stepsRemaining } : null);
 
+    // Snapshot the player's pre-move explored set so the client can replay
+    // the fog reveal one tile at a time during the move animation.
+    const exploredBaseline = exploredKeys ? Array.from(exploredKeys) : [];
     events.push({
       type: 'hero_moved',
       heroEntityId,
+      playerId,
       fromQ,
       fromR,
       toQ: getComponent(this.world, heroEntityId, 'Position').q,
       toR: getComponent(this.world, heroEntityId, 'Position').r,
-      stepsConsumed: consumedSteps,
+      path: consumedPath,
+      exploredBaseline,
     });
     recomputeFogForAllPlayers(this.world, this.registry);
   }

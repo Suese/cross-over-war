@@ -77,10 +77,12 @@ class PriorityQueue {
   }
 }
 
-// Find a path from (startQ, startR) to (goalQ, goalR). Returns null if no
-// path exists. Cost ignores fog (we plan over the full known structure of
-// the map; the caller is responsible for hiding what shouldn't be visible).
-export function findPath(world, registry, start, goal) {
+// Find a path from start to goal. Returns null if no path exists.
+//
+// options.exploredKeys: Set<"q,r"> — when provided, undiscovered tiles are
+// treated as impassable. The start tile is always considered passable (the
+// hero is standing on it), and the goal must be in the explored set.
+export function findPath(world, registry, start, goal, options = {}) {
   if (!start || !goal) return null;
   if (start.q === goal.q && start.r === goal.r) return { steps: [], costs: [] };
 
@@ -88,6 +90,9 @@ export function findPath(world, registry, start, goal) {
   const goalKey = hexKey(goal.q, goal.r);
   const goalTile = tileIndex.get(goalKey);
   if (!goalTile || !goalTile.terrain.walkable) return null;
+
+  const explored = options.exploredKeys;
+  if (explored && !explored.has(goalKey)) return null;
 
   const startKey = hexKey(start.q, start.r);
   if (!tileIndex.has(startKey)) return null;
@@ -110,6 +115,7 @@ export function findPath(world, registry, start, goal) {
       const nextKey = hexKey(nextQ, nextR);
       const nextTile = tileIndex.get(nextKey);
       if (!nextTile || !nextTile.terrain.walkable) continue;
+      if (explored && !explored.has(nextKey)) continue;
       const stepCost = nextTile.terrain.movementCost ?? 1;
       const newCost = costSoFar.get(currentKey) + stepCost;
       const previousBest = costSoFar.get(nextKey);

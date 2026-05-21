@@ -91,8 +91,10 @@ export function createTerrainInstanceManager({ scene, registry, assets, hexSize 
   }
 
   // viewerPlayerId may be null (omniscient — render every tile fully lit).
-  function updateFogForViewer(world, viewerPlayerId) {
-    const fog = viewerFog(world, viewerPlayerId);
+  // fogOverride: { visibleKeys, exploredKeys } takes precedence over the
+  // world's fog when supplied — used to drive shroud-puncture animations.
+  function updateFogForViewer(world, viewerPlayerId, fogOverride) {
+    const fog = fogOverride ?? viewerFog(world, viewerPlayerId);
     for (const group of groupsByTerrainId.values()) {
       const { mesh, tiles } = group;
       for (let instanceIndex = 0; instanceIndex < tiles.length; instanceIndex++) {
@@ -118,8 +120,12 @@ export function createTerrainInstanceManager({ scene, registry, assets, hexSize 
 
 function fogState(fog, key) {
   if (!fog) return 'visible';
-  if (fog.visible.has(key)) return 'visible';
-  if (fog.explored.has(key)) return 'explored';
+  // Accept either ECS-shaped fog ({ visible, explored: Set }) or override-shaped
+  // fog ({ visibleKeys, exploredKeys: Set }).
+  const visible = fog.visibleKeys ?? fog.visible;
+  const explored = fog.exploredKeys ?? fog.explored;
+  if (visible?.has(key)) return 'visible';
+  if (explored?.has(key)) return 'explored';
   return 'hidden';
 }
 
