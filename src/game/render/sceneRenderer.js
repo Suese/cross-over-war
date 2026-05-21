@@ -78,6 +78,10 @@ export function createSceneRenderer(canvas) {
   applyCameraPlacement();
 
   const objectMeshesByEntityId = new Map();
+  // Meshes whose entity no longer exists but that we keep on screen for a
+  // brief grace window — e.g. a campfire collected mid-animation should
+  // remain visible until the hero finishes walking onto it.
+  const meshGraveyard = new Map();   // entityId → { mesh, removeAt }
   let activePathOverlay = null;
 
   function syncObjects(world, viewerPlayerId, registry, assets, options = {}) {
@@ -85,7 +89,18 @@ export function createSceneRenderer(canvas) {
     const fogOverride = options.fogOverride;
     const nowMs = options.nowMs ?? performance.now();
 
+    // Sweep the graveyard first so already-expired ghosts release their slots
+    // before this frame's `seen` pass repopulates `objectMeshesByEntityId`.
+    for (const [entityId, entry] of meshGraveyard) {
+      if (nowMs >= entry.removeAt) {
+        objectGroup.remove(entry.mesh);
+        meshGraveyard.delete(entityId);
+      }
+    }
+
     const seen = new Set();
+    const fog = fogOverride ?? viewerFog(world, viewerPlayerId);
+
     forEachEntityWith(world, ['Hero', 'Position'], (entityId, hero, position) => {
       seen.add(entityId);
       const ownership = getComponent(world, entityId, 'Ownership');
@@ -112,18 +127,53 @@ export function createSceneRenderer(canvas) {
         mesh.quaternion.identity();
       }
 
-      const fog = fogOverride ?? viewerFog(world, viewerPlayerId);
-      const key = displayQ + ',' + displayR;
+      const heroKey = displayQ + ',' + displayR;
       const fogVisible = fog?.visibleKeys ?? fog?.visible;
-      const visible = !fog || fogVisible?.has(key) || ownerPlayerId === viewerPlayerId;
-      mesh.visible = visible;
+      const heroVisible = !fog || fogVisible?.has(heroKey) || ownerPlayerId === viewerPlayerId;
+      mesh.visible = heroVisible;
     });
-    for (const [entityId, mesh] of objectMeshesByEntityId) {
-      if (!seen.has(entityId)) {
-        objectGroup.remove(mesh);
-        objectMeshesByEntityId.delete(entityId);
+
+    forEachEntityWith(world, ['MapObject', 'Position'], (entityId, mapObject, position) => {
+      seen.add(entityId);
+      let mesh = objectMeshesByEntityId.get(entityId);
+      if (!mesh) {
+        const type = registry.mapObjectTypes.get(mapObject.typeId);
+        if (!type?.buildMesh) return;
+        mesh = type.buildMesh(registry, assets, mapObject);
+        objectGroup.add(mesh);
+        objectMeshesByEntityId.set(entityId, mesh);
       }
+      const point = hexToPixel(position.q, position.r, HEX_SIZE);
+      mesh.position.set(point.x, 0, point.z);
+      // Map objects don't move, so revealing them once is enough — show them
+      // both when visible and explored, but keep them hidden under shroud.
+      const objectKey = position.q + ',' + position.r;
+      const fogVisible = fog?.visibleKeys ?? fog?.visible;
+      const fogExplored = fog?.exploredKeys ?? fog?.explored;
+      mesh.visible = !fog || fogVisible?.has(objectKey) || fogExplored?.has(objectKey);
+    });
+
+    // Move missing entities' meshes into the graveyard for a short grace
+    // period so they don't vanish mid-animation when the host destroys the
+    // entity at the same moment the hero "arrives".
+    const graceMs = heroAnimations?.hasActiveAnimation() ? animationGraceMs(heroAnimations, nowMs) : 0;
+    for (const [entityId, mesh] of objectMeshesByEntityId) {
+      if (seen.has(entityId)) continue;
+      if (graceMs > 0) {
+        meshGraveyard.set(entityId, { mesh, removeAt: nowMs + graceMs });
+      } else {
+        objectGroup.remove(mesh);
+      }
+      objectMeshesByEntityId.delete(entityId);
     }
+  }
+
+  // The grace window is the time remaining on the longest active animation
+  // plus a small fudge — enough that anything destroyed "at arrival" sticks
+  // around until the player visually sees the hero land on it.
+  function animationGraceMs(heroAnimations, nowMs) {
+    const remaining = heroAnimations.maxRemainingMs?.(nowMs) ?? 1200;
+    return Math.max(400, remaining + 120);
   }
 
   function showPath(pathPlan) {

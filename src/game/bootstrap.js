@@ -26,6 +26,7 @@ import { installPointerInput } from './input/pointerInput.js';
 import { installCursorHud } from './input/cursorHud.js';
 import { installHudOverlay } from './ui/hudOverlay.js';
 import { installInfoOverlay } from './ui/infoOverlay.js';
+import { showOkay, showYesNo } from './ui/dialogs.js';
 import { findPath, estimateTurnsForPath, invalidateTileIndex } from './map/pathfinding.js';
 import { generateMap } from './map/mapgen.js';
 import { inflateFog } from './map/fog.js';
@@ -387,7 +388,7 @@ export function startGameSession({
     net.sendAction?.(action);
   }
 
-  function attemptEndTurn() {
+  async function attemptEndTurn() {
     if (isLocalCommandLocked()) return;
     const world = viewerWorld();
     if (!world) return;
@@ -397,8 +398,11 @@ export function startGameSession({
       if (movement.movementLeft > 0) stillHasMovement = true;
     });
     if (stillHasMovement) {
-      const ok = hud.confirmEndTurn('You still have movement points remaining. End the day anyway?');
-      if (!ok) return;
+      const confirmed = await showYesNo(
+        'You still have movement points remaining. End the day anyway?',
+        { title: 'End turn?', yesLabel: 'End turn', noLabel: 'Cancel' },
+      );
+      if (!confirmed) return;
     }
     sendAction({ name: 'end_turn' });
   }
@@ -552,11 +556,30 @@ export function startGameSession({
     return state?.fogByPlayer?.[myPlayerId]?.explored ?? null;
   }
 
+  // Step duration is shared with heroAnimations.STEP_DURATION_MS. Kept here
+  // as a constant so the popover defer-time aligns with the animation length
+  // without having to round-trip through that module.
+  const ANIMATION_STEP_MS = 220;
+
   function queueAnimationsFromEvents(events) {
+    // Track how long any subsequent popover should wait so it fires after
+    // the hero finishes walking onto the collectable. Events are emitted in
+    // play order by the host, so a collectable_visited event always follows
+    // the hero_moved event that delivered the hero there.
+    let pendingDelayMs = 0;
     for (const event of events) {
-      if (event?.type !== 'hero_moved') continue;
-      const hero = getComponent(viewerWorld(), event.heroEntityId, 'Hero');
-      heroAnimations.enqueueFromEvent(event, myPlayerId, hero);
+      if (event?.type === 'hero_moved') {
+        const hero = getComponent(viewerWorld(), event.heroEntityId, 'Hero');
+        heroAnimations.enqueueFromEvent(event, myPlayerId, hero);
+        if (event.playerId === myPlayerId && Array.isArray(event.path)) {
+          pendingDelayMs = Math.max(pendingDelayMs, event.path.length * ANIMATION_STEP_MS);
+        }
+      } else if (event?.type === 'collectable_visited') {
+        if (event.playerId !== myPlayerId) continue;
+        const message = event.message ?? 'You find nothing.';
+        const title = event.objectName ?? null;
+        setTimeout(() => { showOkay(message, { title }); }, pendingDelayMs);
+      }
     }
   }
 

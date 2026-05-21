@@ -169,9 +169,53 @@ registerPointOfInterestType(registry, {
 
 ### Map-object types — `registerMapObjectType(registry, definition)`
 
-A map object is a passive entity on the map (resource pile, obstacle, decorative
-prop). Same shape as POIs, minus `onVisit`. Currently just registered for
-later use by spawners.
+A map object is any non-hero entity placed on the map — collectables, decorative
+props, resource piles, obstacles. The type registration tells the renderer how
+to draw instances and (optionally) how visiting them is handled:
+
+```js
+registerMapObjectType(registry, {
+  id: 'campfires/campfire',
+  name: 'Camp Fire',
+  description: 'An old campfire still smouldering at the edges.',
+  prefabId: 'campfires/campfire',
+  buildMesh: (registry, assets, mapObject) => /* THREE.Group */,
+});
+```
+
+Instances must carry a `MapObject` component with the matching `typeId`. The
+renderer iterates `MapObject + Position` entities, looks the type up, and
+calls `buildMesh`. Add a `Collectable` component to make stepping onto the
+tile fire a visit event (see [Collectables](#collectables)). Add
+`BlocksMovement` to make instances impassable.
+
+### World spawners — `registerWorldSpawner(registry, spawnerFn)`
+
+Called once at the start of a fresh game, after the map terrain is generated
+and player heroes are placed, before fog initialisation. Lets a module
+scatter its instances across the world without the engine having to know about
+them.
+
+```js
+registerWorldSpawner(registry, ({ world, registry, mapWidth, mapHeight, seed, occupiedHexes }) => {
+  // walk world tiles, pick spots, spawnFromPrefab(registry, 'mymod/thing', world, { q, r })
+  // add each placed hex to `occupiedHexes` so later spawners don't collide.
+});
+```
+
+`occupiedHexes` is a mutable `Set<"q,r">` seeded with every hero spawn — push
+your own placements into it so subsequent spawners stay out of your way.
+Spawners run on the host inside `startNewGame()`; loaded saves already contain
+their entities and skip this hook.
+
+### Collectables
+
+Add a `Collectable { message }` component to a `MapObject` entity to make
+stepping onto its hex fire a `collectable_visited` event. The host's
+`gameRoom._moveAlongPath` halts the hero on the collectable's tile, destroys
+the entity, and broadcasts the event. The client receives the event and
+shows the message in an Okay dialog after the hero's walk animation finishes.
+The `campfires` module is the canonical example.
 
 ### Asset references — `declareAssetReference(registry, reference)`
 
@@ -252,12 +296,15 @@ extend a base prefab, you should know what's already on it.
 
 | Component   | Attached by    | Fields                                                                 |
 |-------------|----------------|------------------------------------------------------------------------|
-| `Tile`      | `base/tile`    | `q`, `r`, `terrainId`                                                  |
-| `Hero`      | `base/hero`    | `archetypeId`, `name`, `visionRadius`, `modelKey`                      |
-| `Position`  | `base/hero`    | `q`, `r`                                                               |
-| `Movement`  | `base/hero`    | `movementMax`, `movementLeft`, `plannedPath` (`{ steps, costs }` or null) |
-| `Ownership` | `base/hero`    | `playerId`                                                             |
-| `WorldState`| `gameRoom.js`  | `turn`, `activePlayerId`, `fogByPlayer`, `playerSlots`, …              |
+| `Tile`           | `base/tile`            | `q`, `r`, `terrainId`                                                  |
+| `Hero`           | `base/hero`            | `archetypeId`, `name`, `visionRadius`, `modelKey`                      |
+| `Position`       | `base/hero`            | `q`, `r`                                                               |
+| `Movement`       | `base/hero`            | `movementMax`, `movementLeft`, `plannedPath` (`{ steps, costs }` or null) |
+| `Ownership`      | `base/hero`            | `playerId`                                                             |
+| `BlocksMovement` | `base/hero`            | empty tag — any entity carrying it occupies its hex for pathfinding    |
+| `MapObject`      | map-object prefabs     | `typeId` — selects the registered type for rendering and visit logic   |
+| `Collectable`    | collectable prefabs    | `message` — text shown in the Okay dialog when a hero visits the tile  |
+| `WorldState`     | `gameRoom.js`          | `turn`, `activePlayerId`, `fogByPlayer`, `playerSlots`, …              |
 
 Add your own components freely — `addComponent(world, entityId, 'YourName',
 data)` is enough. For replication, see the next section.

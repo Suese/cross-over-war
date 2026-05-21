@@ -121,6 +121,19 @@ export function createHeroAnimations(hexSize) {
 
   function hasActiveAnimation() { return animations.size > 0; }
 
+  // Longest amount of time (ms) any active animation still has to play. Used
+  // by the renderer to keep just-destroyed map-object meshes visible until
+  // the hero visually arrives at them.
+  function maxRemainingMs(nowMs) {
+    let longest = 0;
+    for (const animation of animations.values()) {
+      const elapsedMs = nowMs - animation.startedAt;
+      const remaining = animation.totalDurationMs - elapsedMs;
+      if (remaining > longest) longest = remaining;
+    }
+    return longest;
+  }
+
   function hasActiveAnimationForPlayer(playerId) {
     for (const animation of animations.values()) {
       if (animation.playerId === playerId) return true;
@@ -159,6 +172,7 @@ export function createHeroAnimations(hexSize) {
     currentFogTick,
     hasActiveAnimation,
     hasActiveAnimationForPlayer,
+    maxRemainingMs,
     clearForEntity,
     quaternionForYaw,
   };

@@ -80,13 +80,7 @@ export function installHudOverlay(rootElement, callbacks) {
 
   function setStatus(text) { statusLine.textContent = text ?? ''; }
 
-  function confirmEndTurn(message) {
-    // Replaceable with a fancier in-canvas dialog later; window.confirm is
-    // sufficient for the demo and keeps the UI uncluttered.
-    return window.confirm(message);
-  }
-
-  return { render, setStatus, confirmEndTurn };
+  return { render, setStatus };
 }
 
 function escapeHtml(s) {

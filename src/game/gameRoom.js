@@ -15,6 +15,7 @@ import {
   createWorld, createEntity, addComponent, getComponent, getWorldState,
   forEachEntityWith, setChangeRecording, consumePendingChanges,
   setComponentTracked, patchComponentTracked, createTrackedEntity,
+  destroyTrackedEntity,
 } from './ecs/world.js';
 import { createRegistry, getTerrain, spawnFromPrefab } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
@@ -152,6 +153,20 @@ export class GameRoom {
         takenSpawns.push(extraSpawn);
         this._spawnPlayerHero(player.playerId, playerIndex, extraHeroIndex, extraSpawn);
       }
+    }
+
+    // Modules scatter their world objects (collectables, decorations, …)
+    // here, after heroes are placed so spawners can avoid hero tiles.
+    const occupiedHexes = new Set(takenSpawns.map(s => s.q + ',' + s.r));
+    for (const spawnerFn of this.registry.worldSpawners ?? []) {
+      spawnerFn({
+        world: this.world,
+        registry: this.registry,
+        mapWidth: this.mapWidth,
+        mapHeight: this.mapHeight,
+        seed: this.seed,
+        occupiedHexes,
+      });
     }
 
     const stateEntityId = getWorldState(this.world);
@@ -369,6 +384,27 @@ export class GameRoom {
       patchComponentTracked(this.world, heroEntityId, 'Position', ['r'], next.r);
       consumedPath.push({ q: next.q, r: next.r });
       stepsRemaining.shift();
+
+      // Did we just step onto a collectable? Visit and halt. Heroes always
+      // stop on the tile of the thing they pick up so the player has time to
+      // see what happened — matches HoMM3.
+      const collectableEntityId = findCollectableAt(this.world, next.q, next.r);
+      if (collectableEntityId != null) {
+        const collectable = getComponent(this.world, collectableEntityId, 'Collectable');
+        const mapObject = getComponent(this.world, collectableEntityId, 'MapObject');
+        const type = mapObject ? this.registry.mapObjectTypes.get(mapObject.typeId) : null;
+        events.push({
+          type: 'collectable_visited',
+          playerId,
+          heroEntityId,
+          collectableEntityId,
+          typeId: mapObject?.typeId ?? null,
+          objectName: type?.name ?? null,
+          message: collectable?.message ?? 'You find nothing.',
+        });
+        destroyTrackedEntity(this.world, collectableEntityId);
+        break;
+      }
     }
     if (consumedPath.length === 0) return;
     patchComponentTracked(this.world, heroEntityId, 'Movement', ['plannedPath'],
@@ -482,6 +518,18 @@ export class GameRoom {
     });
     return foundTerrain;
   }
+}
+
+// Find the entity id of any Collectable sitting on a given hex. Returns null
+// if nothing is there. Linear scan — fine since the campfire population is
+// small relative to the tile count.
+function findCollectableAt(world, q, r) {
+  let result = null;
+  forEachEntityWith(world, ['Collectable', 'Position'], (entityId, _collectable, position) => {
+    if (result != null) return;
+    if (position.q === q && position.r === r) result = entityId;
+  });
+  return result;
 }
 
 // Collect the "q,r" key of every BlocksMovement+Position entity except the

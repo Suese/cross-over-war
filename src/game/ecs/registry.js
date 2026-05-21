@@ -11,7 +11,8 @@ export function createRegistry() {
     prefabs: new Map(),     // id → spawn function (world, params) → entityId
     heroes: new Map(),      // id → hero archetype { name, prefabId, stats... }
     pointOfInterestTypes: new Map(),  // id → { name, prefabId, onVisit(world, hero, target) }
-    mapObjectTypes: new Map(),        // id → { name, prefabId }
+    mapObjectTypes: new Map(),        // id → { name, prefabId, buildMesh, onVisit? }
+    worldSpawners: [],      // [(context) => void] — invoked once after map-gen + hero placement
     assetReferences: [],    // [{ moduleName, kind, id, path }] — for audit
   };
 }
@@ -58,6 +59,17 @@ export function registerPointOfInterestType(registry, definition) {
 export function registerMapObjectType(registry, definition) {
   if (!definition.id) throw new Error('registerMapObjectType: id required');
   registry.mapObjectTypes.set(definition.id, definition);
+}
+
+// Register a function that scatters entities across the freshly-generated
+// world. Each spawner is invoked once at the start of a new game, after
+// terrain and hero spawns but before fog initialisation. The context object
+// carries the world, registry, map dimensions, seed, and a mutable Set of
+// 'q,r' keys that have already been claimed — spawners should add their own
+// placements to this Set so later spawners don't collide.
+export function registerWorldSpawner(registry, spawnerFn) {
+  if (typeof spawnerFn !== 'function') throw new Error('registerWorldSpawner: function required');
+  registry.worldSpawners.push(spawnerFn);
 }
 
 // Record that a definition expects to find a particular asset on disk.
