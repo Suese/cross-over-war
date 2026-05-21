@@ -25,6 +25,7 @@ import { createHeroAnimations } from './render/heroAnimations.js';
 import { installPointerInput } from './input/pointerInput.js';
 import { installCursorHud } from './input/cursorHud.js';
 import { installHudOverlay } from './ui/hudOverlay.js';
+import { installInfoOverlay } from './ui/infoOverlay.js';
 import { findPath, estimateTurnsForPath, invalidateTileIndex } from './map/pathfinding.js';
 import { generateMap } from './map/mapgen.js';
 import { inflateFog } from './map/fog.js';
@@ -38,6 +39,7 @@ export function startGameSession({
   players,              // host: initial player list
   net,                  // { broadcast(msg), sendTo(peerId, msg), sendAction(action) }
   loadFromSnapshot,     // host-only: an optional persistence-loaded snapshot to resume
+  mapSize,              // host-only fresh-game: { width, height }; ignored when loading a save
   onLeave,
 }) {
   const assets = createAssetLoader();
@@ -55,6 +57,7 @@ export function startGameSession({
   if (mode === 'host') {
     gameRoom = new GameRoom({
       assets,
+      mapSize,
       broadcast: (message) => net.broadcast?.(message),
       sendTo: (peerId, message) => net.sendTo?.(peerId, message),
       log: (...args) => console.log('[gameRoom]', ...args),
@@ -105,6 +108,7 @@ export function startGameSession({
     getSelectedHeroEntityId: () => selectedHeroEntityId,
   });
   const cursorHud = installCursorHud(document.body);
+  const infoOverlay = installInfoOverlay(document.body);
 
   // ── Input ───────────────────────────────────────────────────────────────
   installPointerInput(renderer, {
@@ -122,7 +126,8 @@ export function startGameSession({
           '<span style="color:#ff8484">unknown</span>');
         return;
       }
-      const path = findPath(viewerWorld(), viewerRegistry(), position, hex, { exploredKeys });
+      const blockedKeys = collectBlockedKeysExcluding(viewerWorld(), heroId);
+      const path = findPath(viewerWorld(), viewerRegistry(), position, hex, { exploredKeys, blockedKeys });
       if (!path || path.steps.length === 0) {
         cursorHud.show(event.clientX, event.clientY, '·');
         return;
@@ -141,20 +146,31 @@ export function startGameSession({
       );
     },
     onPlanPath: (hex) => {
+      if (isLocalCommandLocked()) return;
       const heroId = ensureSelectedHero();
       if (!heroId) return;
       sendAction({ name: 'plan_path', heroEntityId: heroId, goalQ: hex.q, goalR: hex.r });
     },
     onConfirmMove: () => {
+      if (isLocalCommandLocked()) return;
       const heroId = ensureSelectedHero();
       if (!heroId) return;
       sendAction({ name: 'move_along_path', heroEntityId: heroId });
     },
     onClearPath: () => {
+      if (isLocalCommandLocked()) return;
       const heroId = ensureSelectedHero();
       if (!heroId) return;
       sendAction({ name: 'clear_path', heroEntityId: heroId });
     },
+    onInfoRequest: (hex, event) => {
+      cursorHud.hide();
+      const html = buildInfoPanelHtml(hex);
+      if (!html) { infoOverlay.hide(); return; }
+      infoOverlay.show(event.clientX, event.clientY, html);
+    },
+    onInfoMove: (event) => infoOverlay.move(event.clientX, event.clientY),
+    onInfoRelease: () => infoOverlay.hide(),
   });
 
   // ── Render passes ───────────────────────────────────────────────────────
@@ -251,8 +267,8 @@ export function startGameSession({
     // non-tile state and replay components verbatim.
     if (!(clientWorld.componentStores.get('Tile')?.size > 0)) {
       const seed = snapshot.seed ?? 1337;
-      const width = snapshot.mapWidth ?? 256;
-      const height = snapshot.mapHeight ?? 256;
+      const width = snapshot.mapWidth ?? 64;
+      const height = snapshot.mapHeight ?? 64;
       const before = performance.now();
       generateMap(clientWorld, clientRegistry, { width, height, seed, tilePrefabId: 'base/tile' });
       invalidateTileIndex(clientWorld);
@@ -372,6 +388,7 @@ export function startGameSession({
   }
 
   function attemptEndTurn() {
+    if (isLocalCommandLocked()) return;
     const world = viewerWorld();
     if (!world) return;
     let stillHasMovement = false;
@@ -384,6 +401,123 @@ export function startGameSession({
       if (!ok) return;
     }
     sendAction({ name: 'end_turn' });
+  }
+
+  // Suppress local user actions while one of the viewer's own heroes is mid
+  // animation. Other players' animations don't lock our input — they only
+  // affect their own UI. Without this, plotting + executing a second path
+  // before the first move's animation finishes makes the hero visually snap
+  // because the new event resets the animation's `fromQ,fromR` baseline to
+  // the (already-updated) ECS Position.
+  function isLocalCommandLocked() {
+    return heroAnimations.hasActiveAnimationForPlayer(myPlayerId);
+  }
+
+  // Build the right-click-hold context panel content for whatever's on this
+  // hex. Returns HTML, or null if there is nothing to describe (off-map).
+  function buildInfoPanelHtml(hex) {
+    const world = viewerWorld();
+    if (!world) return null;
+    const explored = currentViewerExploredSet();
+    const key = hex.q + ',' + hex.r;
+
+    // Unexplored hexes get a minimal panel — we shouldn't leak terrain or
+    // hero presence the viewer hasn't scouted yet.
+    if (explored && !explored.has(key)) {
+      return sectionTitle('Unknown', '#ff8484')
+        + plainLine('You haven\'t scouted this area.');
+    }
+
+    const sections = [];
+
+    // Hero on this hex (if any) first — that's usually what a right-click
+    // is asking about when a hero is standing there.
+    const heroInfo = findHeroAt(world, hex.q, hex.r);
+    if (heroInfo) sections.push(buildHeroSection(heroInfo));
+
+    const terrain = lookupTerrainAt(world, viewerRegistry(), hex.q, hex.r);
+    if (terrain) sections.push(buildTerrainSection(terrain));
+
+    if (sections.length === 0) return plainLine('Nothing here.');
+    return sections.join('<div style="height:8px"></div>');
+  }
+
+  function buildHeroSection({ hero, ownerPlayerName, isViewerOwned }) {
+    const ownerLine = ownerPlayerName
+      ? plainLine('<span style="opacity:0.75">' + (isViewerOwned ? 'Your hero' : 'Owned by ' + escapeHtml(ownerPlayerName)) + '</span>')
+      : '';
+    return sectionTitle(hero.name ?? 'Hero', '#a8e6ff') + ownerLine;
+  }
+
+  function buildTerrainSection(terrain) {
+    const traversal = (terrain.traversableBy ?? []).map(humaniseMode);
+    const traversalLine = traversal.length
+      ? 'Traversable by: <span style="color:#a8e6ff">' + traversal.join(', ') + '</span>'
+      : 'Traversable by: <span style="color:#ff8484">— none —</span>';
+    const description = terrain.description
+      ? '<div style="opacity:0.8; margin-top:4px">' + escapeHtml(terrain.description) + '</div>'
+      : '';
+    return sectionTitle(terrain.name ?? terrain.id, '#7fffa8')
+      + plainLine('Move cost: ' + (terrain.movementCost ?? '?'))
+      + plainLine(traversalLine)
+      + description;
+  }
+
+  function sectionTitle(text, accent) {
+    return '<div style="font-weight:600; color:' + accent + '; margin-bottom:2px">' + escapeHtml(text) + '</div>';
+  }
+  function plainLine(html) {
+    return '<div>' + html + '</div>';
+  }
+  function humaniseMode(mode) {
+    return mode.charAt(0).toUpperCase() + mode.slice(1);
+  }
+  function escapeHtml(text) {
+    return String(text)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;');
+  }
+
+  function findHeroAt(world, q, r) {
+    let result = null;
+    forEachEntityWith(world, ['Hero', 'Position'], (entityId, hero, position) => {
+      if (result) return;
+      if (position.q !== q || position.r !== r) return;
+      const ownership = getComponent(world, entityId, 'Ownership');
+      const ownerId = ownership?.playerId ?? null;
+      const ownerPlayer = ownerId ? lastKnownPlayers.find(p => (p.playerId ?? p.id) === ownerId) : null;
+      result = {
+        entityId,
+        hero,
+        ownerPlayerName: ownerPlayer?.name ?? null,
+        isViewerOwned: ownerId === myPlayerId,
+      };
+    });
+    return result;
+  }
+
+  function lookupTerrainAt(world, registry, q, r) {
+    // The pathfinding tile index is keyed by 'q,r'. It's already built (and
+    // cached on the world) by every plan-path call, but rebuilding it here
+    // when missing is cheap-ish for an info pop.
+    const cache = world._tileIndex;
+    if (cache) {
+      const hit = cache.get(q + ',' + r);
+      return hit ? hit.terrain : null;
+    }
+    let terrain = null;
+    forEachEntityWith(world, ['Tile'], (entityId, tile) => {
+      if (terrain) return;
+      if (tile.q !== q || tile.r !== r) return;
+      terrain = getTerrainFromRegistry(registry, tile.terrainId);
+    });
+    return terrain;
+  }
+
+  function getTerrainFromRegistry(registry, terrainId) {
+    return registry.terrains.get(terrainId) ?? null;
   }
 
   function ensureSelectedHero() {
@@ -450,6 +584,17 @@ export function startGameSession({
     getMissingAssetsMarkdown: () =>
       formatMissingAssetsMarkdown(assets.getMissingAssets(), declarationListFor(viewerRegistry(), assets)),
   };
+}
+
+// Local mirror of the host-side helper so the client's hover preview agrees
+// with the host's authoritative planner about which tiles are blocked.
+function collectBlockedKeysExcluding(world, excludeEntityId) {
+  const blocked = new Set();
+  forEachEntityWith(world, ['BlocksMovement', 'Position'], (entityId, _block, position) => {
+    if (entityId === excludeEntityId) return;
+    blocked.add(position.q + ',' + position.r);
+  });
+  return blocked;
 }
 
 function rebuildPathCosts(world, registry, startPosition, rawSteps) {

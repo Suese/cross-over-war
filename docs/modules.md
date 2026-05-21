@@ -93,13 +93,22 @@ points at one of these.
 registerTerrain(registry, {
   id: 'grass',              // required, unique
   name: 'Grass',
+  description: 'Open meadow. Easy going for any traveller on foot.', // shown in info panel
   movementCost: 1,
-  walkable: true,           // false → impassable; pathfinding refuses it
-  water: false,             // useful for vehicle-type checks later on
+  traversableBy: ['land', 'air'],  // compositional — see below
   fallbackColor: 0x7fbf5e,  // used by InstancedMesh material if no texture loads
   textureKey: 'base/grass.png', // optional — looked up in the asset loader
 });
 ```
+
+**`traversableBy`** is a list of movement-mode tags the terrain admits. Land,
+sea, and air are conventions used by the base module — there is no central
+registry of modes, so any module can introduce new ones (e.g. `'underground'`,
+`'astral'`) and any hero / unit that opts into the same tag becomes able to
+cross terrain that lists it. Pathfinding intersects the mover's modes against
+each terrain's `traversableBy`: at least one mode in common = passable. Heroes
+are implicitly land-only for now; when ships / fliers exist, give them an
+explicit `traversalModes` field and pass it through `findPath`.
 
 The renderer (`src/game/render/terrainInstances.js`) creates one `InstancedMesh`
 per registered terrain id. So **a new terrain id = a new draw call**. Don't go

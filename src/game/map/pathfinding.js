@@ -1,6 +1,11 @@
 // A* over the hex grid. Tile data is read out of the ECS world: each tile
 // entity has a Tile component (q, r, terrainId), and the registry tells us
-// each terrain's movement cost and whether it's walkable.
+// each terrain's movement cost plus which traversal modes it supports
+// (land / sea / air / …). A caller asks for a path with a list of modes the
+// mover can use; a tile is passable iff one of the mover's modes appears in
+// the terrain's `traversableBy` list. Heroes are land units for now, so
+// findPath defaults to ['land'] — change the default in one place when
+// ships/fliers appear.
 //
 // Cost units are "movement points" — a hero with movementMax=20 can spend up
 // to 20 points worth of terrain on a turn. We return both the path and a
@@ -34,6 +39,14 @@ function getOrBuildTileIndex(world, registry) {
 export function invalidateTileIndex(world) {
   world._tileIndex = null;
   world._tileIndexRegistryRef = null;
+}
+
+// Re-exported so consumers (mapgen, gameRoom, UI) check traversability through
+// the same predicate the pathfinder uses.
+export function terrainSupportsAnyMode(terrain, modes) {
+  if (!terrain?.traversableBy) return false;
+  for (const mode of modes) if (terrain.traversableBy.includes(mode)) return true;
+  return false;
 }
 
 // Minimal priority queue (binary heap) keyed by numeric priority.
@@ -82,14 +95,20 @@ class PriorityQueue {
 // options.exploredKeys: Set<"q,r"> — when provided, undiscovered tiles are
 // treated as impassable. The start tile is always considered passable (the
 // hero is standing on it), and the goal must be in the explored set.
+// options.blockedKeys: Set<"q,r"> — tiles occupied by other heroes / map
+// objects. The start tile must NOT be in this set (callers exclude their own
+// hero's position). The goal counts as blocked too — no walking into a hero.
 export function findPath(world, registry, start, goal, options = {}) {
   if (!start || !goal) return null;
   if (start.q === goal.q && start.r === goal.r) return { steps: [], costs: [] };
 
+  const traversalModes = options.traversalModes ?? ['land'];
+  const blocked = options.blockedKeys;
   const tileIndex = getOrBuildTileIndex(world, registry);
   const goalKey = hexKey(goal.q, goal.r);
   const goalTile = tileIndex.get(goalKey);
-  if (!goalTile || !goalTile.terrain.walkable) return null;
+  if (!goalTile || !terrainSupportsAnyMode(goalTile.terrain, traversalModes)) return null;
+  if (blocked && blocked.has(goalKey)) return null;
 
   const explored = options.exploredKeys;
   if (explored && !explored.has(goalKey)) return null;
@@ -114,8 +133,9 @@ export function findPath(world, registry, start, goal, options = {}) {
       const nextR = currentR + direction.r;
       const nextKey = hexKey(nextQ, nextR);
       const nextTile = tileIndex.get(nextKey);
-      if (!nextTile || !nextTile.terrain.walkable) continue;
+      if (!nextTile || !terrainSupportsAnyMode(nextTile.terrain, traversalModes)) continue;
       if (explored && !explored.has(nextKey)) continue;
+      if (blocked && blocked.has(nextKey)) continue;
       const stepCost = nextTile.terrain.movementCost ?? 1;
       const newCost = costSoFar.get(currentKey) + stepCost;
       const previousBest = costSoFar.get(nextKey);

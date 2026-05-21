@@ -23,28 +23,41 @@ import {
   flattenFog, inflateFog,
 } from './map/fog.js';
 import { generateMap, findSpawnHex } from './map/mapgen.js';
-import { findPath, invalidateTileIndex } from './map/pathfinding.js';
+import { findPath, invalidateTileIndex, terrainSupportsAnyMode } from './map/pathfinding.js';
 import { hashWorld, MESSAGE_KINDS } from './protocol.js';
 import { writeSave, newSaveId } from './persistence.js';
 
 const STARTING_HERO_ARCHETYPES = ['base/bob', 'base/alice', 'base/john', 'base/ringo'];
 const HEROES_PER_PLAYER = 2;
-const MAP_WIDTH = 256;
-const MAP_HEIGHT = 256;
-const MIN_SPAWN_SEPARATION = 40;
+const DEFAULT_MAP_DIMENSION = 64;
 // Minimum hex distance between two heroes belonging to the same player at
 // spawn. 1 means they can be adjacent but not stacked on the same tile.
 const SAME_PLAYER_SPAWN_SEPARATION = 1;
 const STARTING_MOVEMENT_MAX = 50;
 
+// Cross-player spawn separation scales with map size so a 64×64 map doesn't
+// inherit the 256×256 game's 40-hex gap (which would consume most of the
+// board). One-sixth of the smaller dimension keeps players reasonably far
+// apart at any size, with an absolute floor so tiny test maps still work.
+function spawnSeparationForMap(width, height) {
+  return Math.max(8, Math.floor(Math.min(width, height) / 6));
+}
+
 export class GameRoom {
-  constructor({ assets, broadcast, sendTo, log }) {
+  constructor({ assets, mapSize, broadcast, sendTo, log }) {
     this.world = createWorld();
     this.registry = createRegistry();
     this.assets = assets;
     this.broadcast = broadcast ?? (() => {});
     this.sendTo = sendTo ?? ((_id, _msg) => {});
     this.log = log ?? (() => {});
+
+    // Map dimensions are baked in at construction. For fresh games the
+    // lobby supplies a size; for loadFromSave() the saved snapshot overrides
+    // these in the load path. Default to a small map so a forgotten/unset
+    // size doesn't dump the user back on a 65k-tile slab.
+    this.mapWidth = mapSize?.width ?? DEFAULT_MAP_DIMENSION;
+    this.mapHeight = mapSize?.height ?? DEFAULT_MAP_DIMENSION;
 
     this.players = [];           // [{ playerId, name, connected: bool, originalPlayerId: <savedId|null> }]
     this.started = false;
@@ -60,8 +73,8 @@ export class GameRoom {
       currentPlayerIndex: 0,
       turnNumber: 1,
       seed: this.seed,
-      mapWidth: MAP_WIDTH,
-      mapHeight: MAP_HEIGHT,
+      mapWidth: this.mapWidth,
+      mapHeight: this.mapHeight,
       fogByPlayer: {},
       phase: 'lobby',
     });
@@ -105,15 +118,16 @@ export class GameRoom {
     if (this.started) return;
     this.started = true;
     const tiles = generateMap(this.world, this.registry, {
-      width: MAP_WIDTH,
-      height: MAP_HEIGHT,
+      width: this.mapWidth,
+      height: this.mapHeight,
       seed: this.seed,
       tilePrefabId: 'base/tile',
     });
     invalidateTileIndex(this.world);
 
     const takenSpawns = [];
-    const ringRadius = Math.min(MAP_WIDTH, MAP_HEIGHT) / 2 - 12;
+    const minSeparation = spawnSeparationForMap(this.mapWidth, this.mapHeight);
+    const ringRadius = Math.max(2, Math.min(this.mapWidth, this.mapHeight) / 2 - Math.max(4, Math.floor(Math.min(this.mapWidth, this.mapHeight) / 16)));
     for (let playerIndex = 0; playerIndex < this.players.length; playerIndex++) {
       const player = this.players[playerIndex];
       const angle = (playerIndex / this.players.length) * Math.PI * 2;
@@ -122,7 +136,7 @@ export class GameRoom {
         r: Math.round(Math.sin(angle) * ringRadius),
       };
       // Primary spawn — far from every other player's heroes.
-      const primarySpawn = findSpawnHex(this.world, this.registry, tiles, preferred, MIN_SPAWN_SEPARATION, takenSpawns);
+      const primarySpawn = findSpawnHex(this.world, this.registry, tiles, preferred, minSeparation, takenSpawns);
       if (!primarySpawn) { this.log('no spawn found for player ' + player.playerId); continue; }
       takenSpawns.push(primarySpawn);
       this._spawnPlayerHero(player.playerId, playerIndex, 0, primarySpawn);
@@ -162,14 +176,18 @@ export class GameRoom {
     this.started = true;
     this.saveId = savedSnapshot.id ?? this.saveId;
     this.seed = savedSnapshot.seed;
+    // Saved game wins over any lobby-supplied mapSize — the snapshot's
+    // entities were generated against those dimensions.
+    this.mapWidth = savedSnapshot.mapWidth ?? this.mapWidth;
+    this.mapHeight = savedSnapshot.mapHeight ?? this.mapHeight;
 
     // Stop recording while we replay the snapshot's initial state.
     setChangeRecording(this.world, false);
 
     // Regenerate tiles (host needs them locally for pathfinding/_terrainAt).
     generateMap(this.world, this.registry, {
-      width: savedSnapshot.mapWidth ?? MAP_WIDTH,
-      height: savedSnapshot.mapHeight ?? MAP_HEIGHT,
+      width: this.mapWidth,
+      height: this.mapHeight,
       seed: this.seed,
       tilePrefabId: 'base/tile',
     });
@@ -258,8 +276,8 @@ export class GameRoom {
       entityIds: nonTileEntityIds,
       components: componentsByName,
       seed: this.seed,
-      mapWidth: MAP_WIDTH,
-      mapHeight: MAP_HEIGHT,
+      mapWidth: this.mapWidth,
+      mapHeight: this.mapHeight,
       players: this.players,
     };
   }
@@ -295,7 +313,8 @@ export class GameRoom {
     const position = getComponent(this.world, heroEntityId, 'Position');
     const goal = { q: action.goalQ, r: action.goalR };
     const exploredKeys = this._playerExploredSet(playerId);
-    const path = findPath(this.world, this.registry, position, goal, { exploredKeys });
+    const blockedKeys = collectBlockedKeysExcluding(this.world, heroEntityId);
+    const path = findPath(this.world, this.registry, position, goal, { exploredKeys, blockedKeys });
     if (path) {
       patchComponentTracked(this.world, heroEntityId, 'Movement', ['plannedPath'], { steps: path.steps });
       events.push({ type: 'path_planned', heroEntityId, goal });
@@ -330,14 +349,19 @@ export class GameRoom {
     const fromQ = position.q;
     const fromR = position.r;
     const exploredKeys = this._playerExploredSet(playerId);
+    const blockedKeys = collectBlockedKeysExcluding(this.world, heroEntityId);
     const stepsRemaining = plan.steps.slice();
     const consumedPath = [];
     while (stepsRemaining.length > 0) {
       const next = stepsRemaining[0];
+      const nextKey = next.q + ',' + next.r;
       // Block movement into tiles the planner couldn't have seen.
-      if (exploredKeys && !exploredKeys.has(next.q + ',' + next.r)) break;
+      if (exploredKeys && !exploredKeys.has(nextKey)) break;
+      // Block movement into tiles occupied by another hero / map object.
+      // Re-checked each step in case the world state changed since planning.
+      if (blockedKeys.has(nextKey)) break;
       const terrain = getTerrain(this.registry, this._terrainAt(next.q, next.r));
-      if (!terrain || !terrain.walkable) break;
+      if (!terrainSupportsAnyMode(terrain, ['land'])) break;
       const cost = terrain.movementCost;
       if (movement.movementLeft < cost) break;
       patchComponentTracked(this.world, heroEntityId, 'Movement', ['movementLeft'], movement.movementLeft - cost);
@@ -458,6 +482,19 @@ export class GameRoom {
     });
     return foundTerrain;
   }
+}
+
+// Collect the "q,r" key of every BlocksMovement+Position entity except the
+// caller's own (a planning hero must not consider itself an obstacle). Any
+// future map-object prefab that wants to block movement just attaches the
+// BlocksMovement component — the engine doesn't need to enumerate types.
+function collectBlockedKeysExcluding(world, excludeEntityId) {
+  const blocked = new Set();
+  forEachEntityWith(world, ['BlocksMovement', 'Position'], (entityId, _block, position) => {
+    if (entityId === excludeEntityId) return;
+    blocked.add(position.q + ',' + position.r);
+  });
+  return blocked;
 }
 
 // ── Reconnect helpers ───────────────────────────────────────────────────

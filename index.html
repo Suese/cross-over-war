@@ -56,6 +56,14 @@
         <h3>Players</h3>
         <ul id="player-list"></ul>
         <div class="row" id="host-controls">
+          <label id="map-size-row" class="map-size-row">
+            Map size
+            <select id="map-size-select">
+              <option value="64" selected>64 × 64</option>
+              <option value="128">128 × 128</option>
+              <option value="256">256 × 256</option>
+            </select>
+          </label>
           <button id="start-btn" class="primary">Start game</button>
         </div>
         <p class="tag" id="waiting-tag">Need at least 2 players to start.</p>

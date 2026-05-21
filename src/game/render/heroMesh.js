@@ -11,10 +11,6 @@ import {
   MeshStandardMaterial,
   Group,
   Color,
-  CanvasTexture,
-  SRGBColorSpace,
-  Sprite,
-  SpriteMaterial,
 } from 'three';
 import { hexToPixel } from '../map/hex.js';
 
@@ -33,27 +29,6 @@ function colourForPlayer(playerId) {
   let hash = 0;
   for (let i = 0; i < playerId.length; i++) hash = (hash + playerId.charCodeAt(i)) >>> 0;
   return PLAYER_PALETTE[hash % PLAYER_PALETTE.length];
-}
-
-function buildLabelSprite(text) {
-  const size = 128;
-  const canvas = document.createElement('canvas');
-  canvas.width = size; canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, size, size);
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(0, 38, size, 52);
-  ctx.font = 'bold 36px "Inter", system-ui, sans-serif';
-  ctx.fillStyle = '#fff';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, size / 2, 66);
-  const texture = new CanvasTexture(canvas);
-  texture.colorSpace = SRGBColorSpace;
-  const sprite = new Sprite(new SpriteMaterial({ map: texture, transparent: true }));
-  sprite.scale.set(2.0, 2.0, 1);
-  sprite.position.set(0, 1.6, 0);
-  return sprite;
 }
 
 export function buildHeroMesh(registry, assets, hero, ownerPlayerId) {
@@ -95,10 +70,8 @@ export function buildHeroMesh(registry, assets, hero, ownerPlayerId) {
   nose.castShadow = true;
   group.add(nose);
 
-  // Name label above the head.
-  const label = buildLabelSprite(hero?.name ?? 'Hero');
-  label.position.y = 1.85;
-  group.add(label);
+  // Hero names live in the right-click info panel rather than as a floating
+  // sprite above the mesh — the map reads cleaner without persistent labels.
 
   // If the registry references a model and the asset exists, swap in the
   // model. Done after the cube is in place so something is always visible.

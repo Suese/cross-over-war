@@ -121,6 +121,13 @@ export function createHeroAnimations(hexSize) {
 
   function hasActiveAnimation() { return animations.size > 0; }
 
+  function hasActiveAnimationForPlayer(playerId) {
+    for (const animation of animations.values()) {
+      if (animation.playerId === playerId) return true;
+    }
+    return false;
+  }
+
   // String token that changes whenever the fog override would render
   // differently — used to gate the (expensive) per-instance fog update so
   // we only re-upload buffers when the hero crosses a tile boundary.
@@ -151,6 +158,7 @@ export function createHeroAnimations(hexSize) {
     fogOverrideFor,
     currentFogTick,
     hasActiveAnimation,
+    hasActiveAnimationForPlayer,
     clearForEntity,
     quaternionForYaw,
   };

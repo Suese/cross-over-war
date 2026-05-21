@@ -3,7 +3,9 @@
 // Behaviour mirrors HoMM3 closely:
 //   • First click on a tile plots a path for the currently-selected hero.
 //   • Second click on the same destination (or pressing M) sends the move.
-//   • Right-click clears the current plan.
+//   • Right-click-and-hold pops a context info panel for whatever is under
+//     the cursor; the cursor can drag to inspect adjacent tiles. Release
+//     hides the panel. Escape clears the current plan.
 //   • Mouse wheel zooms; WASD / arrow keys pan the camera.
 //   • Hover invokes `onHoverHex` with the (q, r) under the cursor and the
 //     currently-planned path so the cursor HUD can show travel days.
@@ -19,6 +21,12 @@ export function installPointerInput(renderer, hooks) {
   let dragStartY = 0;
   let dragStartTargetX = 0;
   let dragStartTargetZ = 0;
+
+  // Right-click-and-hold info-panel state. While `infoHeld` is true the
+  // hover hooks are skipped so the cursor HUD doesn't fight the info panel,
+  // and the panel updates whenever the cursor crosses into a new hex.
+  let infoHeld = false;
+  let lastInfoHexKey = null;
 
   function pixelUnderPointer(event) {
     const groundPoint = renderer.screenToWorldGroundPoint(event.clientX, event.clientY);
@@ -40,13 +48,32 @@ export function installPointerInput(renderer, hooks) {
       renderer.panCamera(0, 0); // re-applies placement
       return;
     }
+    if (infoHeld) {
+      const hex = pixelUnderPointer(event);
+      if (!hex) return;
+      const key = hex.q + ',' + hex.r;
+      hooks.onInfoMove?.(event);
+      if (key !== lastInfoHexKey) {
+        lastInfoHexKey = key;
+        hooks.onInfoRequest?.(hex, event);
+      }
+      return;
+    }
     const hex = pixelUnderPointer(event);
     if (!hex) return;
     hooks.onHoverHex?.(hex, event);
   });
 
   canvas.addEventListener('pointerdown', (event) => {
-    if (event.button === 2) return; // right-click handled in contextmenu
+    if (event.button === 2) {
+      const hex = pixelUnderPointer(event);
+      if (!hex) return;
+      infoHeld = true;
+      lastInfoHexKey = hex.q + ',' + hex.r;
+      canvas.setPointerCapture(event.pointerId);
+      hooks.onInfoRequest?.(hex, event);
+      return;
+    }
     if (event.button === 1) {
       dragging = true;
       dragStartX = event.clientX;
@@ -59,6 +86,13 @@ export function installPointerInput(renderer, hooks) {
   });
 
   canvas.addEventListener('pointerup', (event) => {
+    if (event.button === 2 && infoHeld) {
+      infoHeld = false;
+      lastInfoHexKey = null;
+      try { canvas.releasePointerCapture(event.pointerId); } catch {}
+      hooks.onInfoRelease?.();
+      return;
+    }
     if (event.button === 1 && dragging) {
       dragging = false;
       try { canvas.releasePointerCapture(event.pointerId); } catch {}
@@ -78,10 +112,20 @@ export function installPointerInput(renderer, hooks) {
     hooks.onPlanPath?.(hex);
   });
 
+  // Same safety net for cancel events (e.g. pointer capture lost) — release
+  // the info panel so it can't get stuck on screen.
+  canvas.addEventListener('pointercancel', () => {
+    if (infoHeld) {
+      infoHeld = false;
+      lastInfoHexKey = null;
+      hooks.onInfoRelease?.();
+    }
+  });
+
+  // Always suppress the browser's context menu over the canvas — the right
+  // button is reserved for the info-panel hold. Path clearing lives on Escape.
   canvas.addEventListener('contextmenu', (event) => {
     event.preventDefault();
-    lastPlannedDestinationKey = null;
-    hooks.onClearPath?.();
   });
 
   canvas.addEventListener('wheel', (event) => {

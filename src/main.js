@@ -262,6 +262,13 @@ function renderWaiting() {
     list.appendChild(li);
   });
   $('host-controls').style.display = mode === 'host' ? '' : 'none';
+  // The map-size dropdown is only meaningful for fresh games — a saved game
+  // carries its own map dimensions, and picking a different size at resume
+  // time would just be ignored.
+  const mapSizeRow = $('map-size-row');
+  if (mapSizeRow) {
+    mapSizeRow.style.display = (mode === 'host' && !pendingSaveSnapshot) ? '' : 'none';
+  }
   const connectedCount = lobby.players.filter(p => p.connected !== false).length;
   $('start-btn').disabled = connectedCount < 2 && !pendingSaveSnapshot;
   $('waiting-tag').textContent = mode === 'host'
@@ -280,6 +287,7 @@ function startHostSession() {
   const canvas = $('board');
   const hudRoot = $('game-ui');
   const players = lobby.players.map(p => ({ playerId: p.id, name: p.name }));
+  const mapSize = pendingSaveSnapshot ? null : readSelectedMapSize();
   gameSession = startGameSession({
     mode: 'host',
     canvas,
@@ -287,6 +295,7 @@ function startHostSession() {
     myPlayerId: myId,
     players,
     loadFromSnapshot: pendingSaveSnapshot,
+    mapSize,
     net: {
       broadcast: (message) => host?.broadcast(message),
       sendTo: (peerId, message) => host?.sendTo(peerId, message),
@@ -365,3 +374,11 @@ function escapeHtml(s) {
 }
 
 function msg(e) { return e?.message || String(e); }
+
+function readSelectedMapSize() {
+  const select = $('map-size-select');
+  const raw = Number(select?.value ?? 64);
+  // Allow 64 / 128 / 256 only — anything else falls back to the safe default.
+  const dimension = [64, 128, 256].includes(raw) ? raw : 64;
+  return { width: dimension, height: dimension };
+}

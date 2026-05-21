@@ -8,6 +8,7 @@
 import { hexKey } from './hex.js';
 import { createSeededNoise2D, fractalNoise2D } from './perlin.js';
 import { spawnFromPrefab } from '../ecs/registry.js';
+import { terrainSupportsAnyMode } from './pathfinding.js';
 
 // Terrain id chosen from a height sample (height in [-1, 1]).
 const DEFAULT_HEIGHT_BUCKETS = [
@@ -65,7 +66,7 @@ export function findSpawnHex(world, registry, tilesCreated, preferredCenter, min
   });
   for (const tile of sorted) {
     const terrain = registry.terrains.get(tile.terrainId);
-    if (!terrain || !terrain.walkable) continue;
+    if (!terrainSupportsAnyMode(terrain, ['land'])) continue;
     let tooClose = false;
     for (const taken of takenSpawns) {
       if (hexLikeDistance(tile, taken) < minDistanceFromOthers) { tooClose = true; break; }
