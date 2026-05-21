@@ -122,8 +122,10 @@ replicate to clients), use the tracked mutation helpers — see
 ### Hero archetypes — `registerHero(registry, definition)`
 
 A hero archetype is a named "character class" that resolves to a prefab + a set
-of defaults. The base module registers `'base/bob'` and `'base/alice'` — both
-point at `'base/hero'` with identical defaults.
+of defaults. The base module registers `'base/bob'`, `'base/alice'`,
+`'base/john'`, and `'base/ringo'` — all pointing at `'base/hero'` with
+identical defaults. Each player starts the game with two heroes drawn from this
+list (player 0 gets Bob + Alice, player 1 gets John + Ringo, then it wraps).
 
 ```js
 registerHero(registry, {

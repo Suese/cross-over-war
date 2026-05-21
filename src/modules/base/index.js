@@ -5,7 +5,7 @@
 //     this module's assets/ folder if present, else a colour fallback).
 //   • a tile prefab that adds a Tile component to a fresh entity.
 //   • a hero prefab that adds Hero / Position / Movement / Ownership.
-//   • two named hero archetypes: "Bob" and "Alice", identical.
+//   • four named hero archetypes: "Bob", "Alice", "John", "Ringo", identical.
 
 import {
   createEntity,
@@ -135,6 +135,26 @@ export default {
       prefabId: 'base/hero',
       defaults: {
         archetypeId: 'base/alice',
+        visionRadius: 4,
+        movementMax: 20,
+      },
+    });
+    registerHero(registry, {
+      id: 'base/john',
+      name: 'John',
+      prefabId: 'base/hero',
+      defaults: {
+        archetypeId: 'base/john',
+        visionRadius: 4,
+        movementMax: 20,
+      },
+    });
+    registerHero(registry, {
+      id: 'base/ringo',
+      name: 'Ringo',
+      prefabId: 'base/hero',
+      defaults: {
+        archetypeId: 'base/ringo',
         visionRadius: 4,
         movementMax: 20,
       },

@@ -27,10 +27,14 @@ import { findPath, invalidateTileIndex } from './map/pathfinding.js';
 import { hashWorld, MESSAGE_KINDS } from './protocol.js';
 import { writeSave, newSaveId } from './persistence.js';
 
-const STARTING_HERO_ARCHETYPES = ['base/bob', 'base/alice'];
+const STARTING_HERO_ARCHETYPES = ['base/bob', 'base/alice', 'base/john', 'base/ringo'];
+const HEROES_PER_PLAYER = 2;
 const MAP_WIDTH = 256;
 const MAP_HEIGHT = 256;
 const MIN_SPAWN_SEPARATION = 40;
+// Minimum hex distance between two heroes belonging to the same player at
+// spawn. 1 means they can be adjacent but not stacked on the same tile.
+const SAME_PLAYER_SPAWN_SEPARATION = 1;
 const STARTING_MOVEMENT_MAX = 50;
 
 export class GameRoom {
@@ -117,10 +121,23 @@ export class GameRoom {
         q: Math.round(Math.cos(angle) * ringRadius),
         r: Math.round(Math.sin(angle) * ringRadius),
       };
-      const spawn = findSpawnHex(this.world, this.registry, tiles, preferred, MIN_SPAWN_SEPARATION, takenSpawns);
-      if (!spawn) { this.log('no spawn found for player ' + player.playerId); continue; }
-      takenSpawns.push(spawn);
-      this._spawnPlayerHero(player.playerId, playerIndex, spawn);
+      // Primary spawn — far from every other player's heroes.
+      const primarySpawn = findSpawnHex(this.world, this.registry, tiles, preferred, MIN_SPAWN_SEPARATION, takenSpawns);
+      if (!primarySpawn) { this.log('no spawn found for player ' + player.playerId); continue; }
+      takenSpawns.push(primarySpawn);
+      this._spawnPlayerHero(player.playerId, playerIndex, 0, primarySpawn);
+
+      // Secondary heroes — adjacent to the primary spawn but at least one
+      // hex away from every already-placed hero so they don't stack. They
+      // inherit the primary's cross-player separation through the takenSpawns
+      // chain — i.e. each new hero must stay at least 1 hex from all the
+      // others, regardless of which player owns them.
+      for (let extraHeroIndex = 1; extraHeroIndex < HEROES_PER_PLAYER; extraHeroIndex++) {
+        const extraSpawn = findSpawnHex(this.world, this.registry, tiles, primarySpawn, SAME_PLAYER_SPAWN_SEPARATION, takenSpawns);
+        if (!extraSpawn) { this.log('no extra spawn for player ' + player.playerId); break; }
+        takenSpawns.push(extraSpawn);
+        this._spawnPlayerHero(player.playerId, playerIndex, extraHeroIndex, extraSpawn);
+      }
     }
 
     const stateEntityId = getWorldState(this.world);
@@ -193,11 +210,17 @@ export class GameRoom {
     setChangeRecording(this.world, true);
   }
 
-  _spawnPlayerHero(playerId, playerIndex, spawn) {
+  _spawnPlayerHero(playerId, playerIndex, heroSlotIndex, spawn) {
     // Setup-time spawn — mutations during startNewGame() are discarded from
     // the change buffer because clients pull the initial state from
     // init_snapshot, not deltas. We use the registry prefab directly here.
-    const archetypeId = STARTING_HERO_ARCHETYPES[playerIndex % STARTING_HERO_ARCHETYPES.length];
+    //
+    // Archetype assignment is (playerIndex * HEROES_PER_PLAYER + heroSlotIndex)
+    // mod the archetype list, so a 2-player / 2-hero game gives player 0
+    // Bob + Alice and player 1 John + Ringo. Players past archetype count
+    // wrap around and reuse names — acceptable at high player counts.
+    const archetypeOffset = playerIndex * HEROES_PER_PLAYER + heroSlotIndex;
+    const archetypeId = STARTING_HERO_ARCHETYPES[archetypeOffset % STARTING_HERO_ARCHETYPES.length];
     const archetype = this.registry.heroes.get(archetypeId);
     const heroParams = {
       ...archetype.defaults,
