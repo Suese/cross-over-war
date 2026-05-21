@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Crossover War</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <canvas id="board"></canvas>
+
+    <!-- LOBBY -->
+    <div id="lobby" class="overlay">
+      <div class="panel">
+        <h1 class="title">Crossover War</h1>
+        <p class="tag">A serverless, peer-to-peer turn-based skirmish.</p>
+
+        <label>
+          Your name
+          <input id="name-input" type="text" maxlength="16" placeholder="Commander" />
+        </label>
+
+        <div class="row">
+          <button id="host-btn" class="primary">Host new game</button>
+        </div>
+
+        <div class="divider"><span>or</span></div>
+
+        <label>
+          Room link or code
+          <input id="join-code" type="text" maxlength="500" placeholder="paste room link or code…" />
+        </label>
+        <div class="row">
+          <button id="join-btn" class="primary">Join game</button>
+        </div>
+
+        <div id="lobby-status" class="status"></div>
+      </div>
+    </div>
+
+    <!-- WAITING ROOM -->
+    <div id="waiting" class="overlay hidden">
+      <div class="panel">
+        <h2>Waiting room</h2>
+        <p>Share this link — friends can join right from a browser:</p>
+        <div class="code-box">
+          <code id="room-code"></code>
+          <button id="copy-code" class="small">Copy link</button>
+        </div>
+        <h3>Players</h3>
+        <ul id="player-list"></ul>
+        <div class="row" id="host-controls">
+          <button id="start-btn" class="primary">Start game</button>
+        </div>
+        <p class="tag" id="waiting-tag">Need at least 2 players to start.</p>
+      </div>
+    </div>
+
+    <!-- GAME PLACEHOLDER -->
+    <div id="game-ui" class="hidden">
+      <div id="turn-banner"></div>
+      <div id="scoreboard"></div>
+      <div id="action-bar">
+        <button id="btn-end-turn" class="primary">End turn</button>
+        <button id="btn-leave">Leave</button>
+      </div>
+      <div id="log-panel"><div id="log"></div></div>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
