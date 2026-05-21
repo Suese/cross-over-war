@@ -2,17 +2,17 @@
 
 Crossover War is built as a stack of **modules**. Each module is a folder under
 `src/modules/<name>/` that contributes terrain types, prefabs, hero archetypes,
-points of interest, map-object types, systems, and the art assets that go with
-them. The engine itself ships almost nothing — the `base` module is what makes
-the running game look like a game.
+map-object types, world spawners, and the art assets that go with them. The
+engine itself ships almost nothing — the `base` and `testing` modules are what
+make the running game look like a game.
 
-The goal of this document is to make module authoring obvious. It is the source
-of truth for the module API. **When you add new capabilities to the module
-system, update this file in the same change.**
+This document is the contract between the engine and module authors. It is
+the source of truth for the module API. **When you add new capabilities to
+the module system, update this file in the same change.**
 
 ---
 
-## Quick start: adding a module
+## Quick start
 
 1. Create a folder: `src/modules/<your-module-name>/`.
 2. Drop an `index.js` file in it that default-exports a module definition (see
@@ -21,11 +21,9 @@ system, update this file in the same change.**
 4. Restart the dev server. The module is now installed — there is no central
    registration list to edit.
 
-That is the entire workflow. Vite's `import.meta.glob` discovers every
-`src/modules/*/index.js` and every file under `src/modules/*/assets/**` at
-build / dev time.
-
-To remove a module, delete its folder.
+Vite's `import.meta.glob` discovers every `src/modules/*/index.js` and every
+file under `src/modules/*/assets/**` at build / dev time. Delete a folder to
+remove the module entirely.
 
 ---
 
@@ -38,9 +36,10 @@ import {
   registerTerrain,
   registerPrefab,
   registerHero,
-  registerPointOfInterestType,
   registerMapObjectType,
+  registerWorldSpawner,
   declareAssetReference,
+  spawnFromPrefab,
 } from '../../game/ecs/registry.js';
 
 export default {
@@ -51,8 +50,6 @@ export default {
   },
 };
 ```
-
-The default export must be an object with:
 
 | Field      | Required | Description                                                              |
 |------------|----------|--------------------------------------------------------------------------|
@@ -72,13 +69,32 @@ register({
 })
 ```
 
-A module's `register()` runs at **startup only**. It should not mutate the
-world; it should declare things on the registry. The world is populated later
-by `gameRoom.js` (host) or by the snapshot the host ships (client).
+A module's `register()` runs at **startup only**, in dependency order. It
+should not mutate the world; it should declare things on the registry. The
+world is populated later by `gameRoom.js` (host) or by the snapshot the host
+ships (client).
+
+### Dependencies and load order
+
+```js
+export default {
+  name: 'mining-faction',
+  depends: ['base'],
+  register({ registry }) { /* … */ },
+};
+```
+
+The loader (`src/game/modules/moduleLoader.js`) does a topological sort and
+throws on missing deps or cycles. Within the same dependency tier the order
+is whatever `import.meta.glob` returns — don't rely on it; use `depends` if
+you need ordering.
+
+`base` is currently the foundation; gameplay modules should almost always
+declare `depends: ['base']`.
 
 ---
 
-## What you can register
+## Registry — what your module can register
 
 The registry is intentionally a dumb bag of named definitions. Lookups happen
 by id at runtime. Ids should be namespaced by module: `'base/grass'`,
@@ -86,67 +102,64 @@ by id at runtime. Ids should be namespaced by module: `'base/grass'`,
 
 ### Terrains — `registerTerrain(registry, definition)`
 
-A terrain is a tile flavour. Every `Tile` component carries a `terrainId` that
+A terrain is a tile flavour. Every `Tile` entity carries a `terrainId` that
 points at one of these.
 
 ```js
 registerTerrain(registry, {
-  id: 'grass',              // required, unique
+  id: 'grass',
   name: 'Grass',
-  description: 'Open meadow. Easy going for any traveller on foot.', // shown in info panel
+  description: 'Open meadow. Easy going for any traveller on foot.',
   components: {
     PassableByLand: { cost: 1 },
     PassableByAir:  { cost: 1 },
   },
-  fallbackColor: 0x7fbf5e,  // used by InstancedMesh material if no texture loads
-  textureKey: 'base/grass.png', // optional — looked up in the asset loader
+  fallbackColor: 0x7fbf5e,
+  textureKey: 'base/grass.png',
 });
 ```
 
-#### Traversal — `PassableBy<Mode>` on terrain, `Traverses<Mode>` on movers
+| Field          | Description                                                    |
+|----------------|----------------------------------------------------------------|
+| `id`           | Unique within the registry; namespace by module.               |
+| `name`         | Shown in the right-click info panel.                           |
+| `description`  | Optional flavour text shown in the info panel.                 |
+| `components`   | Map of `PassableBy<Mode>: { cost: N }` entries. See [Traversal](#traversal). |
+| `fallbackColor`| `THREE.Color`-compatible hex. Used by the InstancedMesh material when the texture is missing. |
+| `textureKey`   | Optional asset-loader key for the texture.                     |
 
-Traversability is fully compositional. Each terrain's `components` map holds
-zero or more `PassableBy<Mode>` entries, each carrying its own movement-point
-cost. Each mover (currently always a hero entity) carries `Traverses<Mode>`
-tag components. A mover can cross a terrain iff there exists a mode tag
-common to both sides; when several modes match, the pathfinder picks the
-cheapest one.
-
-The base module declares three modes — `Land`, `Water`, `Air` — but nothing
-in the engine enumerates them. To add an `Underground` traversal, register
-new terrain with `PassableByUnderground: { cost: N }` and have whichever
-units need it carry `TraversesUnderground`; no engine code changes.
-
-See `src/game/ecs/traversal.js` for the two helpers every consumer goes
-through: `collectTraversalModes(world, entityId)` returns the mover's mode
-tags, `resolveTerrainCost(terrain, modes)` returns the cheapest matching
-cost — or `null` if the mover cannot enter at all.
-
-The renderer (`src/game/render/terrainInstances.js`) creates one `InstancedMesh`
-per registered terrain id. So **a new terrain id = a new draw call**. Don't go
-wild — terrains are flavours like grass / desert / lava, not per-tile
-decorations.
+The renderer creates one `InstancedMesh` per registered terrain id — a new
+terrain id costs one draw call. Terrains are flavours like grass / desert /
+lava, not per-tile decorations.
 
 ### Prefabs — `registerPrefab(registry, prefabId, spawn)`
 
 A prefab is a factory function `(world, params) → entityId`. Prefabs are the
-canonical way to spawn entities. The base module ships two:
+canonical way to spawn entities. They may attach any number of components and
+even create **multiple coordinated entities** in one call — see
+[Recipe: building a Wizard's Tower](#recipe-building-a-wizards-tower).
 
-- `'base/tile'` — adds a `Tile { q, r, terrainId }` component
-- `'base/hero'` — adds `Hero`, `Position`, `Movement`, `Ownership`
+```js
+registerPrefab(registry, 'mymod/torch', (world, params) => {
+  const entityId = createEntity(world);
+  addComponent(world, entityId, 'Position', { q: params.q, r: params.r });
+  addComponent(world, entityId, 'MapObject', { typeId: 'mymod/torch' });
+  return entityId;
+});
+```
 
-Call your prefab via `spawnFromPrefab(registry, prefabId, world, params)`. If
-your prefab is the host-authoritative kind (it creates entities that need to
-replicate to clients), use the tracked mutation helpers — see
-[Tracked mutations](#tracked-mutations-host-authoritative-state).
+Call your prefab via `spawnFromPrefab(registry, prefabId, world, params)`. The
+return value (an entityId, or whatever the prefab chooses) is up to you, but
+returning the "anchor" entity is the convention.
 
 ### Hero archetypes — `registerHero(registry, definition)`
 
-A hero archetype is a named "character class" that resolves to a prefab + a set
-of defaults. The base module registers `'base/bob'`, `'base/alice'`,
+A hero archetype is a named "character class" that resolves to a prefab + a
+set of defaults. The base module ships `'base/bob'`, `'base/alice'`,
 `'base/john'`, and `'base/ringo'` — all pointing at `'base/hero'` with
-identical defaults. Each player starts the game with two heroes drawn from this
-list (player 0 gets Bob + Alice, player 1 gets John + Ringo, then it wraps).
+identical defaults. Each player starts the game with two heroes drawn from
+this list (player 0 gets Bob + Alice, player 1 gets John + Ringo, then it
+wraps).
 
 ```js
 registerHero(registry, {
@@ -161,116 +174,56 @@ registerHero(registry, {
 });
 ```
 
-`GameRoom._spawnHeroForPlayer` resolves an archetype and forwards
+`GameRoom._spawnPlayerHero` resolves an archetype and forwards
 `archetype.defaults` as the params to the prefab.
-
-### Points of interest — `registerPointOfInterestType(registry, definition)`
-
-A POI is something on the map that triggers an effect when a hero enters it
-(treasure chests, shrines, towns to capture). Currently the engine only stores
-the registration; runtime visiting will hook in here.
-
-```js
-registerPointOfInterestType(registry, {
-  id: 'base/treasure-chest',
-  name: 'Treasure Chest',
-  prefabId: 'base/treasure-chest',
-  onVisit(world, hero, poiEntityId) { /* … */ },
-});
-```
 
 ### Map-object types — `registerMapObjectType(registry, definition)`
 
-A map object is any non-hero entity placed on the map — collectables, decorative
-props, resource piles, obstacles. The type registration tells the renderer how
-to draw instances and (optionally) how visiting them is handled:
+A map-object type tells the renderer **how to draw** instances of a given
+typeId and acts as a registry of metadata (name, description) the info panel
+and visit events can pull from. Both collectables and points of interest are
+map-object instances under the hood.
 
 ```js
 registerMapObjectType(registry, {
-  id: 'campfires/campfire',
-  name: 'Camp Fire',
-  description: 'An old campfire still smouldering at the edges.',
-  prefabId: 'campfires/campfire',
-  buildMesh: (registry, assets, mapObject) => /* THREE.Group */,
+  id: 'mymod/torch',
+  name: 'Torch',
+  description: 'A wall sconce, still burning.',
+  prefabId: 'mymod/torch',
+  buildMesh: (registry, assets, mapObject) => new THREE.Group(/* … */),
 });
 ```
 
-Instances must carry a `MapObject` component with the matching `typeId`. The
-renderer iterates `MapObject + Position` entities, looks the type up, and
-calls `buildMesh`. Add a `Collectable` component to make stepping onto the
-tile fire a visit event (see [Collectables](#collectables)). Add
-`BlocksMovement` to make instances impassable.
+Instances of this type must carry a `MapObject { typeId: 'mymod/torch' }`
+component plus a `Position`. The renderer iterates `MapObject + Position`
+entities, looks the type up by `typeId`, and calls `buildMesh()` to construct
+the Three.js group.
 
 ### World spawners — `registerWorldSpawner(registry, spawnerFn)`
 
 Called once at the start of a fresh game, after the map terrain is generated
-and player heroes are placed, before fog initialisation. Lets a module
-scatter its instances across the world without the engine having to know about
-them.
+and player heroes are placed, **before** fog initialisation. Lets a module
+scatter its instances across the world without the engine having to know
+about them.
 
 ```js
 registerWorldSpawner(registry, ({ world, registry, mapWidth, mapHeight, seed, occupiedHexes }) => {
-  // walk world tiles, pick spots, spawnFromPrefab(registry, 'mymod/thing', world, { q, r })
+  // walk world tiles, pick spots, spawn with spawnFromPrefab.
   // add each placed hex to `occupiedHexes` so later spawners don't collide.
 });
 ```
 
-`occupiedHexes` is a mutable `Set<"q,r">` seeded with every hero spawn — push
-your own placements into it so subsequent spawners stay out of your way.
-Spawners run on the host inside `startNewGame()`; loaded saves already contain
-their entities and skip this hook.
+| Context field   | Description                                                                  |
+|-----------------|------------------------------------------------------------------------------|
+| `world`         | The ECS world. Use `forEachEntityWith(world, ['Tile'], …)` to walk tiles.    |
+| `registry`      | Same registry handed to your `register()` — useful for `spawnFromPrefab`.    |
+| `mapWidth`      | Map width in hexes.                                                          |
+| `mapHeight`     | Map height in hexes.                                                         |
+| `seed`          | The host's map seed; use it if you want deterministic placement.             |
+| `occupiedHexes` | Mutable `Set<"q,r">` seeded with every hero spawn. **Read it to skip claimed hexes; write into it for every hex you claim**, including all walls of multi-hex structures. |
 
-### Collectables
-
-Add a `Collectable { message }` component to a `MapObject` entity to make
-stepping onto its hex fire a `collectable_visited` event. The host's
-`gameRoom._moveAlongPath` halts the hero on the collectable's tile, destroys
-the entity, and broadcasts the event. The client receives the event and
-shows the message in an Okay dialog after the hero's walk animation finishes.
-The Camp Fire in `src/modules/testing/` is the canonical example.
-
-### Points of interest
-
-Add a `PointOfInterest { message }` component instead of `Collectable` when
-the object should **persist** after a visit — towns, shrines, mushroom huts,
-anything you can revisit. The visit logic is otherwise identical:
-`_moveAlongPath` halts the hero on the tile and broadcasts a
-`point_of_interest_visited` event. The host substitutes `{heroName}` in the
-message before broadcasting.
-
-### Terrain modifiers
-
-`TerrainModifier { components }` is a per-hex override that takes precedence
-over the underlying terrain's passability map at that hex. Used to make
-non-anchor hexes of a multi-hex structure impassable without disturbing the
-base map:
-
-```js
-addComponent(world, wallId, 'Position', { q: someQ, r: someR });
-addComponent(world, wallId, 'TerrainModifier', {
-  components: { PassableByAir: { cost: 1 } },
-});
-```
-
-The pathfinder calls `resolveTerrainCost(modifier ?? terrain, modes)` per
-candidate tile, so any modifier-carrying hex completely replaces the base
-terrain's `PassableBy*` entries for cost lookups. Modifiers are entities —
-they're part of the snapshot, ride the delta protocol, and can be created /
-destroyed like anything else. If you start mutating modifiers mid-game,
-call `invalidateTileIndex(world)` so the pathfinder rebuilds its cache.
-
-### Prefabs as composition
-
-Prefabs are not 1:1 with single entities. The Mushroom Hut prefab in
-`src/modules/testing/` is the canonical example of the composition pattern:
-a single prefab call stamps out a coordinated cluster — one POI entity
-(`MapObject + Position + PointOfInterest`) plus three wall entities
-(`Position + TerrainModifier`). The visible mesh sits on the POI; the walls
-have no mesh, only the terrain-passability override. Nothing in the engine
-knows the "Mushroom Hut" exists as a single concept — it's emergent from
-the atomic pieces a prefab assembled. Town, garrison, dragon-lair, etc.
-prefabs will all follow the same shape: rendering + visit + passability +
-whatever else, layered as separate components on the right entities.
+Spawners run on the host inside `startNewGame()`. Loaded saves already
+contain their entities — the snapshot replay bypasses this hook.
 
 ### Asset references — `declareAssetReference(registry, reference)`
 
@@ -282,15 +235,374 @@ in-browser console.
 ```js
 declareAssetReference(registry, {
   moduleName: 'base',
-  kind: 'texture',        // or 'model'
-  assetKey: 'base/grass.png',  // 'moduleName/relativePath' inside assets/
-  declaredFor: 'terrain:grass', // free-text — appears in the audit output
+  kind: 'texture',                  // or 'model'
+  assetKey: 'base/grass.png',       // 'moduleName/relativePath' inside assets/
+  declaredFor: 'terrain:grass',     // free-text — appears in the audit output
 });
 ```
 
-You should declare a reference for every asset key you pass into a
-`textureKey` / `modelKey` field. The audit will tell you what you're missing
-in `docs/missing_assets.md`.
+Declare a reference for every asset key you pass into a `textureKey` /
+`modelKey` field. The audit only matches **string literals** — runtime-built
+asset keys are invisible to it.
+
+---
+
+## Entity components for map content
+
+The registry tells the engine *what kinds of things exist*; ECS components on
+entities tell the engine *what each individual instance does*. Map content is
+assembled by attaching atomic components to entities — usually inside a prefab.
+
+| Component         | What it does                                                                                    |
+|-------------------|-------------------------------------------------------------------------------------------------|
+| `Position`        | `{ q, r }` — the hex this entity sits on. Required for anything map-resident.                   |
+| `MapObject`       | `{ typeId }` — selects a registered map-object type for rendering + metadata.                   |
+| `Collectable`     | `{ message }` — visiting fires `collectable_visited` and **destroys** the entity.               |
+| `PointOfInterest` | `{ message }` — visiting fires `point_of_interest_visited`; entity **persists**. Supports `{heroName}` substitution. |
+| `TerrainModifier` | `{ components }` — per-hex override of `PassableBy*`. Pathfinder uses modifier instead of base terrain. |
+| `BlocksMovement`  | Empty tag — the hex this entity is on is treated as occupied for pathfinding (heroes, big props). |
+| `Traverses<Mode>` | Empty tag (e.g. `TraversesLand`) — the mover can cross terrain that declares `PassableBy<Mode>`. |
+| `Hero`            | `{ archetypeId, name, visionRadius, modelKey }` — gameplay-side hero data.                      |
+| `Movement`        | `{ movementMax, movementLeft, plannedPath }` — turn-budget bookkeeping.                         |
+| `Ownership`       | `{ playerId }` — who controls this entity.                                                      |
+| `Tile`            | `{ q, r, terrainId }` — map tile. Don't attach manually; created by `generateMap`.              |
+| `WorldState`      | Singleton — turn order, fog, phase, seed. Owned by `gameRoom.js`.                               |
+
+Attach components freely with `addComponent(world, entityId, 'YourName', data)`.
+Anything is allowed — there is no central type registry. Atomic over monolithic:
+prefer many small components (`Collectable`, `BlocksMovement`, `TraversesLand`)
+over one big bag of fields.
+
+### How to make a Collectable
+
+A one-shot pickup. Stepping onto its hex shows a message and removes the
+entity.
+
+```js
+// Prefab
+registerPrefab(registry, 'mymod/wishing-coin', (world, params) => {
+  const entityId = createEntity(world);
+  addComponent(world, entityId, 'Position', { q: params.q, r: params.r });
+  addComponent(world, entityId, 'MapObject', { typeId: 'mymod/wishing-coin' });
+  addComponent(world, entityId, 'Collectable', { message: 'You found a coin!' });
+  return entityId;
+});
+
+// Type for the renderer
+registerMapObjectType(registry, {
+  id: 'mymod/wishing-coin',
+  name: 'Wishing Coin',
+  description: 'A glinting coin half-buried in the moss.',
+  prefabId: 'mymod/wishing-coin',
+  buildMesh: () => /* small disc THREE.Group */,
+});
+```
+
+On the host, `gameRoom._moveAlongPath` checks every step for a `Collectable`
+on the new tile; if it finds one, it halts the hero, emits a
+`collectable_visited` event, and calls `destroyTrackedEntity`. The client
+shows the Okay dialog once the hero's walk animation finishes.
+
+### How to make a Point of Interest
+
+Same as a Collectable, but the entity **persists** so the hero can revisit
+it. Use `PointOfInterest` instead of `Collectable`:
+
+```js
+addComponent(world, entityId, 'PointOfInterest', {
+  message: 'Welcome to the well, {heroName}. Make a wish.',
+});
+```
+
+`{heroName}` substitution happens host-side at visit time, so the wire
+payload already contains the formatted text. The hero halts on the POI's
+tile (same as a Collectable) but the entity stays in the world for next
+time.
+
+### How to make a Map Object (no visit behaviour)
+
+A `MapObject + Position` entity with no `Collectable` or `PointOfInterest`
+component is just decoration — it renders, it shows up in the right-click
+info panel, but stepping onto its hex does nothing special. Add
+`BlocksMovement` if you want a static obstacle (boulder, ruin) heroes
+cannot pass through.
+
+### How to make a Terrain Modifier
+
+When a multi-hex structure needs to make non-anchor hexes impassable
+without rewriting the underlying tile, attach a `TerrainModifier`:
+
+```js
+addComponent(world, wallId, 'Position', { q, r });
+addComponent(world, wallId, 'TerrainModifier', {
+  components: { PassableByAir: { cost: 1 } },   // fliers only
+});
+```
+
+The pathfinder calls `resolveTerrainCost(modifier ?? terrain, modes)` for
+each candidate tile, so the modifier completely replaces the base terrain's
+`PassableBy*` entries for movement purposes (rendering is untouched — the
+ground still shows whatever terrain texture is underneath).
+
+If you start mutating modifiers mid-game, call `invalidateTileIndex(world)`
+so the pathfinder rebuilds its cache. Spawn-time modifiers are picked up
+automatically the first time `findPath` is called.
+
+---
+
+## Prefabs as composition
+
+Prefabs are not 1:1 with single entities. A prefab can stamp out a whole
+**cluster** of coordinated entities in a single call — that is how the
+engine builds "buildings" without needing a `Building` concept.
+
+The Mushroom Hut prefab in `src/modules/testing/` is the worked example:
+one POI entity at the anchor (carries `MapObject + Position +
+PointOfInterest` and the visible mesh) plus four wall entities
+(`Position + TerrainModifier`). The hut emerges from the atoms; the
+engine has no idea what a "Mushroom Hut" is.
+
+Anything can go in a prefab, but on the main map the practical mix is
+some combination of:
+
+- **Rendering** — `MapObject { typeId }` on an anchor entity.
+- **Visit behaviour** — `Collectable` or `PointOfInterest` on the anchor.
+- **Passability changes** — `TerrainModifier` on non-anchor footprint hexes;
+  `BlocksMovement` on the anchor if heroes shouldn't be able to stand on it.
+- **Visible structure** — the type's `buildMesh` returns a `THREE.Group`
+  that may visually span more than one hex (using local-space offsets), but
+  it is still owned by one anchor entity.
+
+---
+
+## Traversal — `PassableBy<Mode>` on terrain, `Traverses<Mode>` on movers
+
+Traversability is fully compositional. Each terrain's `components` map holds
+zero or more `PassableBy<Mode>` entries, each carrying its own movement-point
+cost. Each mover (currently always a hero entity) carries `Traverses<Mode>`
+tag components. A mover can cross a terrain iff there exists a mode tag
+common to both sides; when several modes match, the pathfinder picks the
+cheapest one.
+
+The base module declares three modes — `Land`, `Water`, `Air` — but nothing
+in the engine enumerates them. To add an `Underground` traversal, register
+new terrain with `PassableByUnderground: { cost: N }` and have whichever
+units need it carry `TraversesUnderground`; no engine code changes.
+
+Two helpers in `src/game/ecs/traversal.js` are what every consumer goes
+through:
+
+- `collectTraversalModes(world, entityId)` — returns the mover's mode tags.
+- `resolveTerrainCost(terrain, modes)` — cheapest matching cost, or `null` if
+  the mover cannot enter at all.
+- `listPassableModes(terrain)` — every `{ mode, cost }` for the info panel.
+
+---
+
+## Recipe: building a Wizard's Tower
+
+This is the canonical "complete building" walkthrough. The Wizard's Tower
+will be a 3-hex structure: an entrance POI at the anchor, two stone wall
+hexes forming a small footprint, a tall pointy mesh, fliers-only
+passability for the walls. By the end you'll have map-object rendering,
+visit behaviour, passability changes, and world placement — fully
+integrated, no engine edits.
+
+### 1. Create the folder
+
+```
+src/modules/wizards-tower/
+├── index.js
+└── assets/             # only if you want texture / model overrides
+```
+
+### 2. Write `index.js`
+
+```js
+// src/modules/wizards-tower/index.js
+import {
+  CylinderGeometry, ConeGeometry, BoxGeometry,
+  Mesh, MeshStandardMaterial, Group,
+} from 'three';
+import { createEntity, addComponent, forEachEntityWith } from '../../game/ecs/world.js';
+import {
+  registerPrefab,
+  registerMapObjectType,
+  registerWorldSpawner,
+  getTerrain,
+  spawnFromPrefab,
+} from '../../game/ecs/registry.js';
+import { resolveTerrainCost } from '../../game/ecs/traversal.js';
+import { hexKey } from '../../game/map/hex.js';
+
+const MODULE_NAME = 'wizards-tower';
+const TYPE_ID = 'wizards-tower/tower';
+const PREFAB_ID = 'wizards-tower/tower';
+const DENSITY_TILES_PER_TOWER = 800;
+
+// Footprint: two walls behind the entrance (the POI). The walls become
+// fliers-only TerrainModifier entities; the POI tile stays land-passable
+// so heroes can walk up to it.
+const WALL_OFFSETS = [
+  { dq:  0, dr: -1 },   // N
+  { dq:  1, dr: -1 },   // NE
+];
+
+export default {
+  name: MODULE_NAME,
+  depends: ['base'],
+  register({ registry, log }) {
+    log('registering wizard\'s tower');
+
+    // ── 1) Tell the renderer how to draw the type ──────────────────────
+    registerMapObjectType(registry, {
+      id: TYPE_ID,
+      name: "Wizard's Tower",
+      description: 'A slender stone spire. The wizard rarely receives visitors.',
+      prefabId: PREFAB_ID,
+      buildMesh: () => buildTowerMesh(),
+    });
+
+    // ── 2) Prefab — stamps out the POI + walls in one call ─────────────
+    registerPrefab(registry, PREFAB_ID, (world, params) => {
+      const anchorQ = params.q ?? 0;
+      const anchorR = params.r ?? 0;
+
+      // POI / anchor: visible mesh + visit message.
+      const poiId = createEntity(world);
+      addComponent(world, poiId, 'Position', { q: anchorQ, r: anchorR });
+      addComponent(world, poiId, 'MapObject', { typeId: TYPE_ID });
+      addComponent(world, poiId, 'PointOfInterest', {
+        message: 'The wizard\'s door is locked, {heroName}. Try again another day.',
+      });
+
+      // Walls — no rendering, no visit. Just passability override.
+      for (const offset of WALL_OFFSETS) {
+        const wallId = createEntity(world);
+        addComponent(world, wallId, 'Position', {
+          q: anchorQ + offset.dq,
+          r: anchorR + offset.dr,
+        });
+        addComponent(world, wallId, 'TerrainModifier', {
+          components: { PassableByAir: { cost: 1 } },
+        });
+      }
+
+      return poiId;
+    });
+
+    // ── 3) Spawner — scatter towers on the fresh map ───────────────────
+    registerWorldSpawner(registry, ({ world, registry: reg, occupiedHexes }) => {
+      const tilesByKey = new Map();
+      forEachEntityWith(world, ['Tile'], (_id, tile) => {
+        tilesByKey.set(hexKey(tile.q, tile.r), tile);
+      });
+      if (tilesByKey.size === 0) return;
+
+      // Build the candidate list: anchor + every wall hex must be land,
+      // and none of them may already be claimed.
+      const candidates = [];
+      for (const [key, tile] of tilesByKey) {
+        if (occupiedHexes.has(key)) continue;
+        if (!isLandTile(tile, reg)) continue;
+        let valid = true;
+        for (const off of WALL_OFFSETS) {
+          const fk = hexKey(tile.q + off.dq, tile.r + off.dr);
+          if (occupiedHexes.has(fk)) { valid = false; break; }
+          const ft = tilesByKey.get(fk);
+          if (!ft || !isLandTile(ft, reg)) { valid = false; break; }
+        }
+        if (valid) candidates.push({ q: tile.q, r: tile.r });
+      }
+      if (candidates.length === 0) return;
+
+      const target = Math.max(1, Math.round(tilesByKey.size / DENSITY_TILES_PER_TOWER));
+      let placed = 0;
+      while (placed < target && candidates.length > 0) {
+        const idx = Math.floor(Math.random() * candidates.length);
+        const anchor = candidates[idx];
+        candidates[idx] = candidates[candidates.length - 1];
+        candidates.pop();
+        // Earlier huts / towers may have claimed overlapping hexes.
+        if (occupiedHexes.has(hexKey(anchor.q, anchor.r))) continue;
+        let stillValid = true;
+        for (const off of WALL_OFFSETS) {
+          if (occupiedHexes.has(hexKey(anchor.q + off.dq, anchor.r + off.dr))) {
+            stillValid = false;
+            break;
+          }
+        }
+        if (!stillValid) continue;
+        spawnFromPrefab(reg, PREFAB_ID, world, { q: anchor.q, r: anchor.r });
+        occupiedHexes.add(hexKey(anchor.q, anchor.r));
+        for (const off of WALL_OFFSETS) {
+          occupiedHexes.add(hexKey(anchor.q + off.dq, anchor.r + off.dr));
+        }
+        placed++;
+      }
+    });
+  },
+};
+
+function isLandTile(tile, registry) {
+  const terrain = getTerrain(registry, tile.terrainId);
+  return resolveTerrainCost(terrain, ['Land']) != null;
+}
+
+function buildTowerMesh() {
+  const inner = new Group();
+
+  const stoneMat = new MeshStandardMaterial({ color: 0x8a8c95, roughness: 0.9 });
+  const trunk = new Mesh(new CylinderGeometry(0.5, 0.6, 2.6, 12), stoneMat);
+  trunk.position.y = 1.3;
+  trunk.castShadow = true;
+  trunk.receiveShadow = true;
+  inner.add(trunk);
+
+  const roof = new Mesh(
+    new ConeGeometry(0.7, 0.9, 12),
+    new MeshStandardMaterial({ color: 0x4a5fa2, roughness: 0.7 }),
+  );
+  roof.position.y = 3.05;
+  roof.castShadow = true;
+  inner.add(roof);
+
+  const door = new Mesh(
+    new BoxGeometry(0.35, 0.55, 0.05),
+    new MeshStandardMaterial({ color: 0x3a2418, roughness: 0.9 }),
+  );
+  door.position.set(0, 0.4, 0.55);
+  inner.add(door);
+
+  // Shift the visible structure half a hex north into the wall footprint
+  // so the POI tile to the south reads as "outside the tower".
+  const outer = new Group();
+  inner.position.set(0, 0, -0.75);
+  outer.add(inner);
+  return outer;
+}
+```
+
+### 3. Restart the dev server
+
+`import.meta.glob` re-scans on restart. Start a fresh game and the first
+turn should reveal a few Wizard's Towers — each is a POI with two
+fliers-only wall hexes behind it. Click one to plan a route; the planner
+will refuse a path that tries to walk through the walls.
+
+### 4. What you got, layer by layer
+
+| Layer            | Where it lives                                                              |
+|------------------|-----------------------------------------------------------------------------|
+| Type metadata    | `registerMapObjectType` (rendering hook + display name)                     |
+| Stamp behaviour  | `registerPrefab` (anchor POI + wall entities, all wired in one call)        |
+| Placement        | `registerWorldSpawner` (footprint validation, claim hexes via `occupiedHexes`) |
+| Rendering        | `buildTowerMesh()` returning a `THREE.Group` shifted into the cove          |
+| Visit behaviour  | `PointOfInterest` component on the anchor — engine handles the rest         |
+| Passability      | `TerrainModifier` on each wall hex; pathfinder consults `modifier ?? terrain` |
+
+No engine files were edited. Every piece is opt-in atomic component data
+that existing systems were already looking for.
 
 ---
 
@@ -310,8 +622,8 @@ src/modules/base/
 ```
 
 Subdirectories are fine — the key is the path relative to `assets/`,
-prefixed by the module name. `src/modules/base/assets/heroes/bob.glb` has the
-asset key `'base/heroes/bob.glb'`.
+prefixed by the module name. `src/modules/base/assets/heroes/bob.glb` has
+the asset key `'base/heroes/bob.glb'`.
 
 Supported extensions: `.png`, `.jpg`, `.jpeg`, `.webp`, `.glb`, `.gltf`.
 
@@ -320,8 +632,8 @@ Supported extensions: `.png`, `.jpg`, `.jpeg`, `.webp`, `.glb`, `.gltf`.
 The asset loader (`src/game/modules/assetLoader.js`) exposes:
 
 - `hasAsset(key)` — quick check; doesn't trigger a load
-- `getTexture(key, { requestedBy })` — synchronous; returns a `THREE.Texture` or
-  null and logs to the "missing" list
+- `getTexture(key, { requestedBy })` — synchronous; returns a `THREE.Texture`
+  or null and logs to the "missing" list
 - `loadModel(key, { requestedBy })` — async; resolves to a `THREE.Group` or
   null
 
@@ -332,40 +644,14 @@ log so you can tell which subsystem asked for the file.
 
 `scripts/audit-assets.mjs` runs before every build (`npm run build` →
 `prebuild`). It greps each module's `index.js` for `declareAssetReference()`
-literal calls, compares against the files actually present under
-`assets/`, and writes the diff to `docs/missing_assets.md`. Missing references
-do not break the build — they just show up in the report and as cube fallbacks
-at runtime.
+literal calls, compares against the files actually present under `assets/`,
+and writes the diff to `docs/missing_assets.md`. Missing references do not
+break the build — they just show up in the report and as cube fallbacks at
+runtime.
 
 The audit reads source literally, so `declareAssetReference` calls that use
 runtime-computed strings won't be picked up. Stick with string literals for
 asset keys.
-
----
-
-## Components used by the base module
-
-These are the canonical components attached by the base prefabs. Any module is
-free to add new components — there is no central type registry — but if you
-extend a base prefab, you should know what's already on it.
-
-| Component   | Attached by    | Fields                                                                 |
-|-------------|----------------|------------------------------------------------------------------------|
-| `Tile`           | `base/tile`            | `q`, `r`, `terrainId`                                                  |
-| `Hero`           | `base/hero`            | `archetypeId`, `name`, `visionRadius`, `modelKey`                      |
-| `Position`       | `base/hero`            | `q`, `r`                                                               |
-| `Movement`       | `base/hero`            | `movementMax`, `movementLeft`, `plannedPath` (`{ steps, costs }` or null) |
-| `Ownership`      | `base/hero`            | `playerId`                                                             |
-| `BlocksMovement` | `base/hero`            | empty tag — any entity carrying it occupies its hex for pathfinding    |
-| `Traverses<Mode>`| `base/hero`            | empty tag (e.g. `TraversesLand`) — the mover can cross terrain that declares `PassableBy<Mode>` |
-| `MapObject`      | map-object prefabs     | `typeId` — selects the registered type for rendering and visit logic   |
-| `Collectable`    | collectable prefabs    | `message` — shown in the Okay dialog on visit; entity is destroyed     |
-| `PointOfInterest`| POI prefabs            | `message` — shown in the Okay dialog on visit; entity persists. Supports `{heroName}` substitution |
-| `TerrainModifier`| structure prefabs      | `components` — overrides the base terrain's `PassableBy*` for this hex |
-| `WorldState`     | `gameRoom.js`          | `turn`, `activePlayerId`, `fogByPlayer`, `playerSlots`, …              |
-
-Add your own components freely — `addComponent(world, entityId, 'YourName',
-data)` is enough. For replication, see the next section.
 
 ---
 
@@ -376,7 +662,7 @@ ECS records each mutation as a JSON-patch-like op into `world.pendingChanges`,
 and after each action the GameRoom drains the buffer, broadcasts it as a
 `delta` message, and the clients replay the ops.
 
-If your module needs to mutate world state at runtime (e.g. a POI's `onVisit`
+If your code needs to mutate world state at runtime (e.g. a future POI visit
 handler), use the **tracked** helpers from `src/game/ecs/world.js`:
 
 | Helper                                                          | Op emitted          |
@@ -390,42 +676,15 @@ handler), use the **tracked** helpers from `src/game/ecs/world.js`:
 | `setRemoveTracked(world, id, name, path, value)`                | `set_remove`        |
 | `setReplaceTracked(world, id, name, path, values)`              | `set_replace`       |
 
-For one-time setup inside `register()` (which runs *before* a game session
-exists) the un-tracked helpers (`addComponent`, etc.) are fine — there's no
-client to replicate to yet. The host turns on recording when a session starts.
+For one-time setup inside `register()` and inside world spawners the
+un-tracked helpers (`addComponent`, etc.) are correct — those mutations are
+part of the initial snapshot, not deltas, and any tracked ops emitted at
+setup time get drained and discarded.
 
 If you mutate state from a system that runs purely client-side (cosmetic-only
 work, e.g. a particle system following a hero), keep it un-tracked and make
 sure your changes are derivable from the replicated state — otherwise hosts
 and clients will hash-disagree.
-
----
-
-## Dependencies and load order
-
-If your module needs definitions from another module, list them in `depends`:
-
-```js
-export default {
-  name: 'mining-faction',
-  depends: ['base'],         // base registers the 'base/hero' prefab we extend
-  register({ registry }) {
-    registerHero(registry, {
-      id: 'mining-faction/dwarf-prospector',
-      name: 'Dwarf Prospector',
-      prefabId: 'base/hero',     // ← from base
-      defaults: { /* … */ },
-    });
-  },
-};
-```
-
-The loader (`src/game/modules/moduleLoader.js`) does a topological sort and
-throws on missing deps or cycles. Within the same dependency tier the order
-is whatever `import.meta.glob` returns — don't rely on it.
-
-`base` is currently the only module that anything depends on. New gameplay
-modules should almost always declare `depends: ['base']`.
 
 ---
 
@@ -439,71 +698,12 @@ lifecycle event — the work tends to be:
 2. Add the consumer in `src/game/gameRoom.js`, in a system, or in a renderer,
    depending on where the new content actually does work.
 3. **Document the new helper here.** Add it to
-   [What you can register](#what-you-can-register) with the same shape as the
-   existing entries.
+   [Registry](#registry--what-your-module-can-register) with the same shape
+   as the existing entries.
 4. If the new capability references assets, extend `declareAssetReference`
    support if needed and the audit script in `scripts/audit-assets.mjs`.
-5. Update the base module so the new helper has at least one in-tree usage.
-
-The registry's existing collections (`pointOfInterestTypes`, `mapObjectTypes`)
-are placeholders waiting for runtime wire-up — when you connect them, add the
-runtime behaviour notes here.
-
----
-
-## A complete example
-
-A self-contained module that adds a "desert" terrain and a "Trader" hero
-archetype:
-
-```js
-// src/modules/desert/index.js
-import {
-  registerTerrain,
-  registerHero,
-  declareAssetReference,
-} from '../../game/ecs/registry.js';
-
-const MODULE_NAME = 'desert';
-
-export default {
-  name: MODULE_NAME,
-  depends: ['base'],
-  register({ registry, log }) {
-    log('adding desert terrain and trader hero');
-
-    registerTerrain(registry, {
-      id: 'desert',
-      name: 'Desert',
-      movementCost: 2,
-      walkable: true,
-      water: false,
-      fallbackColor: 0xd9c388,
-      textureKey: 'desert/sand.png',
-    });
-    declareAssetReference(registry, {
-      moduleName: MODULE_NAME,
-      kind: 'texture',
-      assetKey: 'desert/sand.png',
-      declaredFor: 'terrain:desert',
-    });
-
-    registerHero(registry, {
-      id: 'desert/trader',
-      name: 'Trader',
-      prefabId: 'base/hero',
-      defaults: {
-        archetypeId: 'desert/trader',
-        visionRadius: 5,
-        movementMax: 24,
-      },
-    });
-  },
-};
-```
-
-Drop `src/modules/desert/assets/sand.png` next to it (or skip it and let
-`docs/missing_assets.md` flag it). That's the whole module.
+5. Update the base or testing module so the new helper has at least one
+   in-tree usage.
 
 ---
 
@@ -513,15 +713,14 @@ This file is the contract between the engine and module authors. Anything that
 changes the API surface should land in the same change as the doc update:
 
 - Adding a new `registerXxx` helper → new entry under
-  [What you can register](#what-you-can-register).
+  [Registry](#registry--what-your-module-can-register).
 - Adding a new field to an existing register call → add it to the field table
   for that helper.
 - Adding a new context field to `register({...})` → update the
-  [The `register` context](#the-register-context) table.
-- Adding a new component the base prefabs attach → update
-  [Components used by the base module](#components-used-by-the-base-module).
-- Adding a new tracked mutation op → update
-  [Tracked mutations](#tracked-mutations-host-authoritative-state).
+  [register context](#the-register-context) section.
+- Adding a new component the engine reads → update the
+  [Entity components for map content](#entity-components-for-map-content) table.
+- Adding a new tracked mutation op → update [Tracked mutations](#tracked-mutations-host-authoritative-state).
 - Adding support for a new asset file extension → update [Assets](#assets).
 
 If you find the doc is out of date, treat the doc as the bug and fix it.

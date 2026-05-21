@@ -40,13 +40,21 @@ const HUT_PREFAB_ID = 'testing/mushroom-hut';
 const HUT_DENSITY_TILES_PER = 600;
 const HUT_DEFAULT_MESSAGE = 'Sorry {heroName} but the princess is in another castle.';
 
-// Mushroom Hut footprint relative to the anchor (entrance) hex. The anchor
-// is the POI; everything in this list becomes a TerrainModifier-only entity
-// that overrides passability to PassableByAir alone.
+// Mushroom Hut footprint relative to the anchor (POI) hex. The anchor is
+// the POI you visit from the south; the four walls form a "cove" arrangement
+// around it — W and E flanking the POI on its row, with NW and NE one row
+// north — leaving the POI open to the south.
+//
+//        NW  NE
+//        W [POI] E
+//
+// Walls get a TerrainModifier-only entity that overrides passability to
+// PassableByAir alone, so fliers can still cross over.
 const HUT_FOOTPRINT_OFFSETS = [
-  { dq:  0, dr: -1 },   // N
-  { dq:  1, dr: -1 },   // NE
+  { dq:  1, dr:  0 },   // E
   { dq: -1, dr:  0 },   // W
+  { dq:  1, dr: -1 },   // NE
+  { dq:  0, dr: -1 },   // NW
 ];
 
 export default {
@@ -230,11 +238,13 @@ function buildCampfireMesh() {
   return group;
 }
 
-// Mushroom hut — beige stem with a wide red-and-white cap, a dark door, and
-// a glowing window. The cap is offset to -Z so it visually overhangs the
-// three back hexes of the footprint.
+// Mushroom hut — beige stem with a red-and-white cap, dark door, glowing
+// window. Built at full size in the `inner` group, then wrapped: scaled to
+// 75% and shifted north by half a hex so the visible hut nestles into the
+// cove formed by the four wall hexes (E/W/NE/NW). The POI tile to the
+// south is left clear — the hero stands outside, not inside.
 function buildMushroomHutMesh() {
-  const group = new Group();
+  const inner = new Group();
 
   const stem = new Mesh(
     new CylinderGeometry(0.55, 0.72, 1.55, 16),
@@ -243,7 +253,7 @@ function buildMushroomHutMesh() {
   stem.position.set(0, 0.77, 0);
   stem.castShadow = true;
   stem.receiveShadow = true;
-  group.add(stem);
+  inner.add(stem);
 
   const door = new Mesh(
     new BoxGeometry(0.42, 0.7, 0.06),
@@ -251,7 +261,7 @@ function buildMushroomHutMesh() {
   );
   door.position.set(0, 0.5, 0.6);
   door.castShadow = true;
-  group.add(door);
+  inner.add(door);
 
   const windowPane = new Mesh(
     new BoxGeometry(0.22, 0.22, 0.04),
@@ -260,34 +270,40 @@ function buildMushroomHutMesh() {
     }),
   );
   windowPane.position.set(-0.35, 1.08, 0.59);
-  group.add(windowPane);
+  inner.add(windowPane);
 
-  // Cap — hemisphere with slight overhang, scaled flatter and shifted north
-  // so it sits over the three back hexes of the footprint.
+  // Cap — hemisphere centered atop the stem. Radius 1.0 (down from 2.0)
+  // and slightly squashed on Y to read as a mushroom cap.
   const cap = new Mesh(
-    new SphereGeometry(2.0, 24, 14, 0, Math.PI * 2, 0, Math.PI / 2 + 0.15),
+    new SphereGeometry(1.0, 24, 14, 0, Math.PI * 2, 0, Math.PI / 2 + 0.15),
     new MeshStandardMaterial({ color: 0xc23026, roughness: 0.55 }),
   );
-  cap.position.set(0, 1.45, -1.0);
+  cap.position.set(0, 1.45, 0);
   cap.scale.set(1.0, 0.7, 1.0);
   cap.castShadow = true;
-  group.add(cap);
+  inner.add(cap);
 
-  // White spots dotted on the cap.
+  // White spots on the cap, sized for the smaller dome.
   const spotMaterial = new MeshStandardMaterial({ color: 0xfaf0e0, roughness: 0.7 });
   const spots = [
-    { x: -0.70, y: 1.78, z: -1.40 },
-    { x:  0.65, y: 1.92, z: -1.20 },
-    { x:  0.05, y: 2.05, z: -1.00 },
-    { x: -0.45, y: 1.62, z: -0.45 },
-    { x:  0.95, y: 1.45, z: -1.70 },
-    { x: -1.25, y: 1.40, z: -1.20 },
+    { x: -0.40, y: 1.86, z: -0.35 },
+    { x:  0.42, y: 1.92, z: -0.20 },
+    { x:  0.05, y: 2.02, z:  0.20 },
+    { x: -0.25, y: 1.70, z:  0.45 },
+    { x:  0.55, y: 1.62, z:  0.40 },
   ];
   for (const pos of spots) {
-    const spot = new Mesh(new SphereGeometry(0.2, 8, 6), spotMaterial);
+    const spot = new Mesh(new SphereGeometry(0.12, 8, 6), spotMaterial);
     spot.position.set(pos.x, pos.y, pos.z);
-    group.add(spot);
+    inner.add(spot);
   }
 
-  return group;
+  // Wrap and transform. The cove's wall centroid sits at z ≈ -0.75 in
+  // world units from the POI hex, so shifting the hut by that places it
+  // visually inside the cove with the POI tile outside (south) of it.
+  const outer = new Group();
+  inner.scale.set(0.75, 0.75, 0.75);
+  inner.position.set(0, 0, -0.75);
+  outer.add(inner);
+  return outer;
 }
