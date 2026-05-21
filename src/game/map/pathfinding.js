@@ -11,17 +11,29 @@ import { HEX_DIRECTIONS, hexKey, hexDistance } from './hex.js';
 import { forEachEntityWith, getComponent } from '../ecs/world.js';
 import { getTerrain } from '../ecs/registry.js';
 
-// Build a quick lookup: hexKey → { entityId, tile, terrain } for every tile
-// that currently exists. Re-computed each pathfind; for our grid sizes this
-// is cheap and avoids cache invalidation bugs.
-function buildTileIndex(world, registry) {
+// Build (or reuse) a hex-key → { entityId, tile, terrain } lookup over every
+// Tile entity. The 256×256 default map has 65 000 entries, so caching this on
+// the world matters — A* would otherwise rebuild the whole index on every
+// call. Mapgen and any caller that mutates tiles should `invalidateTileIndex`
+// to force a rebuild on the next lookup.
+function getOrBuildTileIndex(world, registry) {
+  if (world._tileIndex && world._tileIndexRegistryRef === registry) {
+    return world._tileIndex;
+  }
   const index = new Map();
   forEachEntityWith(world, ['Tile'], (entityId, tile) => {
     const terrain = getTerrain(registry, tile.terrainId);
     if (!terrain) return;
     index.set(hexKey(tile.q, tile.r), { entityId, tile, terrain });
   });
+  world._tileIndex = index;
+  world._tileIndexRegistryRef = registry;
   return index;
+}
+
+export function invalidateTileIndex(world) {
+  world._tileIndex = null;
+  world._tileIndexRegistryRef = null;
 }
 
 // Minimal priority queue (binary heap) keyed by numeric priority.
@@ -72,7 +84,7 @@ export function findPath(world, registry, start, goal) {
   if (!start || !goal) return null;
   if (start.q === goal.q && start.r === goal.r) return { steps: [], costs: [] };
 
-  const tileIndex = buildTileIndex(world, registry);
+  const tileIndex = getOrBuildTileIndex(world, registry);
   const goalKey = hexKey(goal.q, goal.r);
   const goalTile = tileIndex.get(goalKey);
   if (!goalTile || !goalTile.terrain.walkable) return null;

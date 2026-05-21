@@ -1,9 +1,12 @@
 // Three.js scene + render loop.
 //
 // Camera looks almost straight down with a ~10° forward tilt so foreground
-// hexes read as closer than background ones (top-down with a hint of
-// perspective). The camera follows a pannable "target point" so WASD / drag
-// can scroll the map without rotating it.
+// hexes read as closer than background ones. The camera follows a
+// pannable "target point" so WASD / middle-drag scroll the map.
+//
+// Tiles are owned by a TerrainInstanceManager (see terrainInstances.js),
+// which renders 65k+ hexes via InstancedMesh in a handful of draw calls.
+// Heroes still use individual meshes (a handful of entities).
 
 import {
   Scene,
@@ -19,15 +22,17 @@ import {
   PCFSoftShadowMap,
 } from 'three';
 import { hexToPixel } from '../map/hex.js';
-import { buildTileMesh, applyFogStateToTile } from './tileMesh.js';
 import { buildHeroMesh, setHeroPosition } from './heroMesh.js';
 import { buildPathOverlay } from './pathOverlay.js';
 import { forEachEntityWith, getComponent } from '../ecs/world.js';
 
 const HEX_SIZE = 1.0;
-const CAMERA_DOWN_ANGLE_DEGREES = 80;   // 0 = horizon, 90 = straight down. 80° ≈ 10° tilt from straight-down.
+const CAMERA_DOWN_ANGLE_DEGREES = 80;
+const DEFAULT_CAMERA_DISTANCE = 38;
+const MIN_CAMERA_DISTANCE = 8;
+const MAX_CAMERA_DISTANCE = 300;
 
-export function createSceneRenderer(canvas, registry, assets) {
+export function createSceneRenderer(canvas) {
   const renderer = new WebGLRenderer({ canvas, antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setClearColor(new Color(0x070a12), 1);
@@ -37,28 +42,28 @@ export function createSceneRenderer(canvas, registry, assets) {
   const scene = new Scene();
   scene.background = new Color(0x070a12);
 
-  const tileGroup = new Group();
   const objectGroup = new Group();
   const pathGroup = new Group();
-  scene.add(tileGroup, objectGroup, pathGroup);
+  scene.add(objectGroup, pathGroup);
 
-  const ambient = new AmbientLight(0xffffff, 0.6);
+  const ambient = new AmbientLight(0xffffff, 0.65);
   scene.add(ambient);
-  const sun = new DirectionalLight(0xfff1d0, 1.05);
-  sun.position.set(40, 80, 30);
+  const sun = new DirectionalLight(0xfff1d0, 1.0);
+  sun.position.set(60, 120, 40);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 200;
-  sun.shadow.camera.left = -60;
-  sun.shadow.camera.right = 60;
-  sun.shadow.camera.top = 60;
-  sun.shadow.camera.bottom = -60;
+  sun.shadow.camera.far = 400;
+  sun.shadow.camera.left = -120;
+  sun.shadow.camera.right = 120;
+  sun.shadow.camera.top = 120;
+  sun.shadow.camera.bottom = -120;
   scene.add(sun);
 
-  const camera = new PerspectiveCamera(35, canvas.clientWidth / canvas.clientHeight, 0.1, 500);
+  const camera = new PerspectiveCamera(35, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
   const cameraTarget = new Vector3(0, 0, 0);
-  let cameraDistance = 32;
+  let cameraDistance = DEFAULT_CAMERA_DISTANCE;
+
   function applyCameraPlacement() {
     const angle = (CAMERA_DOWN_ANGLE_DEGREES * Math.PI) / 180;
     const horizontalOffset = Math.cos(angle) * cameraDistance;
@@ -72,34 +77,10 @@ export function createSceneRenderer(canvas, registry, assets) {
   }
   applyCameraPlacement();
 
-  // Maps from entity id → three.js Object3D so the sync pass can find and
-  // update or remove the right node when the ECS state changes.
-  const tileMeshesByEntityId = new Map();
   const objectMeshesByEntityId = new Map();
   let activePathOverlay = null;
 
-  function syncTiles(world, viewerPlayerId) {
-    const seen = new Set();
-    forEachEntityWith(world, ['Tile'], (entityId, tile) => {
-      seen.add(entityId);
-      let mesh = tileMeshesByEntityId.get(entityId);
-      if (!mesh) {
-        mesh = buildTileMesh(registry, assets, tile, HEX_SIZE);
-        tileGroup.add(mesh);
-        tileMeshesByEntityId.set(entityId, mesh);
-      }
-      applyFogStateToTile(mesh, viewerPlayerId, world);
-    });
-    // Garbage-collect any tile mesh whose entity disappeared.
-    for (const [entityId, mesh] of tileMeshesByEntityId) {
-      if (!seen.has(entityId)) {
-        tileGroup.remove(mesh);
-        tileMeshesByEntityId.delete(entityId);
-      }
-    }
-  }
-
-  function syncObjects(world, viewerPlayerId) {
+  function syncObjects(world, viewerPlayerId, registry, assets) {
     const seen = new Set();
     forEachEntityWith(world, ['Hero', 'Position'], (entityId, hero, position) => {
       seen.add(entityId);
@@ -113,8 +94,7 @@ export function createSceneRenderer(canvas, registry, assets) {
       }
       setHeroPosition(mesh, position.q, position.r, HEX_SIZE);
 
-      // Hide heroes outside the viewer's fog (still alive, just unseen).
-      const fog = viewerPlayerId ? getViewerFog(world, viewerPlayerId) : null;
+      const fog = viewerFog(world, viewerPlayerId);
       const key = position.q + ',' + position.r;
       const visible = !fog || fog.visible.has(key) || ownerPlayerId === viewerPlayerId;
       mesh.visible = visible;
@@ -137,7 +117,6 @@ export function createSceneRenderer(canvas, registry, assets) {
     activePathOverlay = buildPathOverlay(pathPlan, HEX_SIZE);
     pathGroup.add(activePathOverlay);
   }
-
   function clearPath() { showPath(null); }
 
   function panCamera(deltaWorldX, deltaWorldZ) {
@@ -145,8 +124,13 @@ export function createSceneRenderer(canvas, registry, assets) {
     cameraTarget.z += deltaWorldZ;
     applyCameraPlacement();
   }
+  function setCameraTargetXZ(x, z) {
+    cameraTarget.x = x;
+    cameraTarget.z = z;
+    applyCameraPlacement();
+  }
   function zoomCamera(factor) {
-    cameraDistance = Math.max(8, Math.min(80, cameraDistance * factor));
+    cameraDistance = Math.max(MIN_CAMERA_DISTANCE, Math.min(MAX_CAMERA_DISTANCE, cameraDistance * factor));
     applyCameraPlacement();
   }
   function centerOnHex(q, r) {
@@ -164,8 +148,6 @@ export function createSceneRenderer(canvas, registry, assets) {
   window.addEventListener('resize', handleResize);
   handleResize();
 
-  // Project a screen-space point to a world-space hex coordinate using a
-  // ray cast against the y=0 plane.
   const raycaster = new Raycaster();
   const screenVector = new Vector2();
   function screenToWorldGroundPoint(screenX, screenY) {
@@ -173,7 +155,6 @@ export function createSceneRenderer(canvas, registry, assets) {
     screenVector.x = ((screenX - rect.left) / rect.width) * 2 - 1;
     screenVector.y = -(((screenY - rect.top) / rect.height) * 2 - 1);
     raycaster.setFromCamera(screenVector, camera);
-    // Plane y=0; t = -origin.y / direction.y.
     const direction = raycaster.ray.direction;
     if (Math.abs(direction.y) < 1e-6) return null;
     const t = -raycaster.ray.origin.y / direction.y;
@@ -192,11 +173,11 @@ export function createSceneRenderer(canvas, registry, assets) {
     camera,
     cameraTarget,
     HEX_SIZE,
-    syncTiles,
     syncObjects,
     showPath,
     clearPath,
     panCamera,
+    setCameraTargetXZ,
     zoomCamera,
     centerOnHex,
     screenToWorldGroundPoint,
@@ -204,12 +185,13 @@ export function createSceneRenderer(canvas, registry, assets) {
   };
 }
 
-function getViewerFog(world, playerId) {
-  const stateEntity = world._worldStateEntity;
-  if (!stateEntity) return null;
-  const componentStore = world.componentStores.get('WorldState');
-  if (!componentStore) return null;
-  const state = componentStore.get(stateEntity);
-  if (!state || !state.fogByPlayer || !state.fogByPlayer[playerId]) return null;
-  return state.fogByPlayer[playerId];
+function viewerFog(world, viewerPlayerId) {
+  if (!viewerPlayerId) return null;
+  const stateEntityId = world._worldStateEntity;
+  if (!stateEntityId) return null;
+  const store = world.componentStores.get('WorldState');
+  if (!store) return null;
+  const state = store.get(stateEntityId);
+  if (!state?.fogByPlayer) return null;
+  return state.fogByPlayer[viewerPlayerId] ?? null;
 }

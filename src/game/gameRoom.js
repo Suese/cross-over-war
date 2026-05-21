@@ -1,55 +1,50 @@
 // GameRoom: host-authoritative wrapper around the ECS world.
 //
-// • Owns the ECS world and registry.
-// • Loads every module on construction (so terrains, prefabs, etc. are ready).
-// • Generates the initial map, spawns one hero per player.
-// • Exposes handleAction(playerId, action) for both the host (driving its own
-//   inputs) and remote clients (forwarded by the host's net layer).
-// • Produces JSON snapshots that the client can ingest verbatim.
+// Tile data is NOT included in snapshots. Both host and client run the same
+// deterministic mapgen against the seed embedded in WorldState, so the tile
+// entities exist identically on both sides without paying ~65k tiles' worth
+// of bytes over the wire on every state change.
 
 import { createWorld, createEntity, addComponent, getComponent, getWorldState, forEachEntityWith, collectEntitiesWith } from './ecs/world.js';
 import { createRegistry, getTerrain, spawnFromPrefab } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
 import { recomputeFogForAllPlayers, flattenFog, inflateFog } from './map/fog.js';
 import { generateMap, findSpawnHex } from './map/mapgen.js';
-import { findPath } from './map/pathfinding.js';
+import { findPath, invalidateTileIndex } from './map/pathfinding.js';
 
 const STARTING_HERO_ARCHETYPES = ['base/bob', 'base/alice'];
-const MAP_RADIUS = 12;
-const MIN_SPAWN_SEPARATION = 6;
+const MAP_WIDTH = 256;
+const MAP_HEIGHT = 256;
+const MIN_SPAWN_SEPARATION = 40;
+const STARTING_MOVEMENT_MAX = 50;
 
 export class GameRoom {
-  // Pass any pre-built asset loader so modules can pull textures out of it.
-  // `broadcast` is invoked whenever world state changes that clients should
-  // see; for host-local play it can be a no-op.
   constructor({ assets, broadcast, log }) {
     this.world = createWorld();
     this.registry = createRegistry();
     this.assets = assets;
     this.broadcast = broadcast ?? (() => {});
     this.log = log ?? (() => {});
-    this.players = [];      // [{ playerId, name }]
+    this.players = [];
     this.started = false;
-    this.currentPlayerIndex = 0;
-    this.turnNumber = 1;
     this.seed = Math.floor(Math.random() * 1_000_000);
 
     loadAllModules({ world: this.world, registry: this.registry, assets: this.assets });
 
-    // Initialize the world-state singleton with bookkeeping.
     const stateEntityId = getWorldState(this.world);
     addComponent(this.world, stateEntityId, 'WorldState', {
       playerOrder: [],
       currentPlayerIndex: 0,
       turnNumber: 1,
       seed: this.seed,
-      mapRadius: MAP_RADIUS,
+      mapWidth: MAP_WIDTH,
+      mapHeight: MAP_HEIGHT,
       fogByPlayer: {},
       phase: 'lobby',
     });
   }
 
-  // ── Lobby plumbing (called by host's net code) ────────────────────────
+  // ── Lobby plumbing (called by host's net code) ──────────────────────────
   addPlayer(playerId, name) {
     if (this.players.some(p => p.playerId === playerId)) return;
     this.players.push({ playerId, name });
@@ -58,25 +53,25 @@ export class GameRoom {
     this.players = this.players.filter(p => p.playerId !== playerId);
   }
 
-  // Build the map, place heroes, mark fog. Called once when the host clicks
-  // "Start game".
+  // Build the map, place heroes, mark fog. Called once when the host clicks "Start game".
   startGame() {
     if (this.started) return;
     this.started = true;
 
     const tiles = generateMap(this.world, this.registry, {
-      radius: MAP_RADIUS,
+      width: MAP_WIDTH,
+      height: MAP_HEIGHT,
       seed: this.seed,
       tilePrefabId: 'base/tile',
     });
+    invalidateTileIndex(this.world);
 
     const takenSpawns = [];
     const playerCount = this.players.length;
-    // Spread spawns around a circle of radius MAP_RADIUS-2 so heroes start far apart.
+    const ringRadius = Math.min(MAP_WIDTH, MAP_HEIGHT) / 2 - 12;
     for (let playerIndex = 0; playerIndex < playerCount; playerIndex++) {
       const player = this.players[playerIndex];
       const angle = (playerIndex / playerCount) * Math.PI * 2;
-      const ringRadius = MAP_RADIUS - 2;
       const preferred = {
         q: Math.round(Math.cos(angle) * ringRadius),
         r: Math.round(Math.sin(angle) * ringRadius),
@@ -95,6 +90,8 @@ export class GameRoom {
         playerId: player.playerId,
         q: spawn.q,
         r: spawn.r,
+        movementMax: STARTING_MOVEMENT_MAX,
+        movementLeft: STARTING_MOVEMENT_MAX,
       };
       spawnFromPrefab(this.registry, archetype.prefabId, this.world, heroParams);
     }
@@ -110,10 +107,13 @@ export class GameRoom {
     this.publishSnapshot();
   }
 
-  // ── Snapshot wire format ──────────────────────────────────────────────
+  // ── Snapshot wire format ────────────────────────────────────────────────
+  // Tile components are deliberately omitted — clients regenerate from the
+  // seed in WorldState, which is way cheaper than serialising 65k tiles.
   buildSnapshot() {
     const componentsByName = {};
     for (const [name, store] of this.world.componentStores) {
+      if (name === 'Tile') continue;
       const flat = {};
       for (const [entityId, data] of store) {
         if (name === 'WorldState') {
@@ -124,10 +124,15 @@ export class GameRoom {
       }
       componentsByName[name] = flat;
     }
+    // Entity-id list also strips tile ids — clients will regenerate them.
+    const tileEntityIds = new Set();
+    const tileStore = this.world.componentStores.get('Tile');
+    if (tileStore) for (const id of tileStore.keys()) tileEntityIds.add(id);
+    const nonTileEntityIds = Array.from(this.world.entities).filter(id => !tileEntityIds.has(id));
     return {
       players: this.players,
       nextEntityId: this.world.nextEntityId,
-      entityIds: Array.from(this.world.entities),
+      entityIds: nonTileEntityIds,
       components: componentsByName,
     };
   }
@@ -135,9 +140,13 @@ export class GameRoom {
     this.broadcast({ type: 'snapshot', snapshot: this.buildSnapshot() });
   }
 
-  // Restore world state from a host's snapshot (client side).
+  // Restore world state from a host's snapshot (client side). Preserves any
+  // existing Tile component store the client has already generated locally.
   static applySnapshot(world, registry, snapshot) {
-    world.nextEntityId = snapshot.nextEntityId;
+    const existingTileStore = world.componentStores.get('Tile');
+    const existingTileEntityIds = existingTileStore ? Array.from(existingTileStore.keys()) : [];
+
+    world.nextEntityId = Math.max(snapshot.nextEntityId, world.nextEntityId);
     world.entities = new Set(snapshot.entityIds);
     world.componentStores = new Map();
     for (const componentName in snapshot.components) {
@@ -153,9 +162,16 @@ export class GameRoom {
       }
       world.componentStores.set(componentName, map);
     }
+
+    // Re-introduce tile entities — they're not in the snapshot but the client
+    // generated them locally from the seed.
+    if (existingTileStore) {
+      for (const id of existingTileEntityIds) world.entities.add(id);
+      world.componentStores.set('Tile', existingTileStore);
+    }
   }
 
-  // ── Actions ───────────────────────────────────────────────────────────
+  // ── Actions ─────────────────────────────────────────────────────────────
   handleAction(playerId, action) {
     if (!action || typeof action !== 'object') return;
     switch (action.name) {
@@ -175,12 +191,7 @@ export class GameRoom {
     const movement = getComponent(this.world, hero.entityId, 'Movement');
     const goal = { q: action.goalQ, r: action.goalR };
     const path = findPath(this.world, this.registry, position, goal);
-    if (!path) {
-      movement.plannedPath = null;
-      this.publishSnapshot();
-      return;
-    }
-    movement.plannedPath = { steps: path.steps };
+    movement.plannedPath = path ? { steps: path.steps } : null;
     this.publishSnapshot();
   }
 
@@ -226,7 +237,6 @@ export class GameRoom {
     worldState.currentPlayerIndex = (worldState.currentPlayerIndex + 1) % this.players.length;
     if (worldState.currentPlayerIndex === 0) worldState.turnNumber += 1;
 
-    // Reset movement for the player whose turn just started.
     const incomingPlayerId = this.players[worldState.currentPlayerIndex].playerId;
     forEachEntityWith(this.world, ['Movement', 'Ownership'], (entityId, movement, ownership) => {
       if (ownership.playerId !== incomingPlayerId) return;
@@ -251,6 +261,13 @@ export class GameRoom {
   }
 
   _terrainAt(q, r) {
+    // Use the cached tile index that pathfinding maintains so this is O(1)
+    // instead of an O(65 000) scan.
+    const cache = this.world._tileIndex;
+    if (cache) {
+      const hit = cache.get(q + ',' + r);
+      return hit ? hit.tile.terrainId : null;
+    }
     let foundTerrain = null;
     forEachEntityWith(this.world, ['Tile'], (entityId, tile) => {
       if (tile.q === q && tile.r === r) foundTerrain = tile.terrainId;

@@ -1,40 +1,42 @@
 // Wires the ECS world, three.js renderer, input handling, and HUD overlay
-// into a running game session. Called by main.js after the host clicks
-// "Start game" or the client receives its first snapshot.
+// into a running game session.
 //
 // Host vs client:
 //   • Host owns a GameRoom that drives the authoritative world and
-//     broadcasts snapshots. Client input goes through GameRoom.handleAction.
-//   • Client owns a passive world that ingests snapshots; client input is
-//     sent to the host via the provided sendAction callback.
+//     broadcasts snapshots. Client input is applied via gameRoom.handleAction.
+//   • Client owns a passive world that ingests snapshots; tile data is NOT
+//     in the snapshot — the client regenerates tiles from the seed embedded
+//     in WorldState the first time it sees a snapshot. Client input is sent
+//     to the host via the provided sendAction callback.
 
-import { createWorld, getComponent, getWorldState, forEachEntityWith, collectEntitiesWith } from './ecs/world.js';
+import { createWorld, getComponent, forEachEntityWith } from './ecs/world.js';
 import { createRegistry, getTerrain } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
 import { createAssetLoader } from './modules/assetLoader.js';
 import { logMissingAssetsToConsole, formatMissingAssetsMarkdown } from './modules/assetAudit.js';
 import { GameRoom } from './gameRoom.js';
 import { createSceneRenderer } from './render/sceneRenderer.js';
+import { createTerrainInstanceManager } from './render/terrainInstances.js';
 import { installPointerInput } from './input/pointerInput.js';
 import { installCursorHud } from './input/cursorHud.js';
 import { installHudOverlay } from './ui/hudOverlay.js';
-import { findPath, estimateTurnsForPath } from './map/pathfinding.js';
-import { hexKey } from './map/hex.js';
+import { findPath, estimateTurnsForPath, invalidateTileIndex } from './map/pathfinding.js';
+import { generateMap } from './map/mapgen.js';
 
 export function startGameSession({
   mode,                       // 'host' | 'client'
   canvas,
-  hudRoot,                    // #game-ui container
+  hudRoot,
   myPlayerId,
   players,                    // initial player list (host only)
-  net,                        // { broadcast(msg), sendAction(action) } — see below
+  net,                        // { broadcast(msg), sendAction(action) }
   onLeave,
 }) {
   const assets = createAssetLoader();
 
-  let gameRoom = null;          // host only
-  let clientWorld = null;       // client only
-  let clientRegistry = null;    // client only
+  let gameRoom = null;
+  let clientWorld = null;
+  let clientRegistry = null;
   let lastKnownPlayers = players ?? [];
 
   if (mode === 'host') {
@@ -51,20 +53,34 @@ export function startGameSession({
     loadAllModules({ world: clientWorld, registry: clientRegistry, assets });
   }
 
-  const renderer = createSceneRenderer(canvas, viewerRegistry(), assets);
+  const renderer = createSceneRenderer(canvas);
+  const terrainManager = createTerrainInstanceManager({
+    scene: renderer.scene,
+    registry: viewerRegistry(),
+    assets,
+    hexSize: renderer.HEX_SIZE,
+  });
 
-  // ── HUD ────────────────────────────────────────────────────────────────
+  if (mode === 'host') {
+    terrainManager.buildFromWorld(viewerWorld());
+  }
+
+  // ── HUD ─────────────────────────────────────────────────────────────────
   let selectedHeroEntityId = null;
   const hud = installHudOverlay(hudRoot, {
     onEndTurnClicked: () => attemptEndTurn(),
     onLeaveClicked: () => onLeave?.(),
-    onHeroClicked: (entityId) => { selectedHeroEntityId = entityId; rerender(); },
+    onHeroClicked: (entityId) => {
+      selectedHeroEntityId = entityId;
+      const position = getComponent(viewerWorld(), entityId, 'Position');
+      if (position) renderer.centerOnHex(position.q, position.r);
+      rerender();
+    },
     getSelectedHeroEntityId: () => selectedHeroEntityId,
   });
-
   const cursorHud = installCursorHud(document.body);
 
-  // ── Input ──────────────────────────────────────────────────────────────
+  // ── Input ───────────────────────────────────────────────────────────────
   installPointerInput(renderer, {
     onHoverHex: (hex, event) => {
       const heroId = ensureSelectedHero();
@@ -93,12 +109,7 @@ export function startGameSession({
     onPlanPath: (hex) => {
       const heroId = ensureSelectedHero();
       if (!heroId) return;
-      sendAction({
-        name: 'plan_path',
-        heroEntityId: heroId,
-        goalQ: hex.q,
-        goalR: hex.r,
-      });
+      sendAction({ name: 'plan_path', heroEntityId: heroId, goalQ: hex.q, goalR: hex.r });
     },
     onConfirmMove: () => {
       const heroId = ensureSelectedHero();
@@ -112,21 +123,19 @@ export function startGameSession({
     },
   });
 
-  // ── Render loop ────────────────────────────────────────────────────────
+  // ── Render passes ───────────────────────────────────────────────────────
   function rerender() {
     const world = viewerWorld();
     if (!world) return;
-    renderer.syncTiles(world, myPlayerId);
-    renderer.syncObjects(world, myPlayerId);
+    terrainManager.updateFogForViewer(world, myPlayerId);
+    renderer.syncObjects(world, myPlayerId, viewerRegistry(), assets);
 
-    // Path overlay for the selected hero.
     const heroId = ensureSelectedHero();
     if (heroId) {
       const position = getComponent(world, heroId, 'Position');
       const movement = getComponent(world, heroId, 'Movement');
       const plan = movement?.plannedPath;
       if (plan && plan.steps?.length) {
-        // Recompute cumulative costs so red/green split is accurate.
         const enriched = rebuildPathCosts(world, viewerRegistry(), position, plan.steps);
         renderer.showPath({
           startQ: position.q,
@@ -150,9 +159,7 @@ export function startGameSession({
     requestAnimationFrame(loop);
   }
   loop();
-  rerender();
 
-  // Center the camera on this player's first hero once available.
   function centerOnFirstHero() {
     const world = viewerWorld();
     if (!world) return;
@@ -162,61 +169,73 @@ export function startGameSession({
       renderer.centerOnHex(position.q, position.r);
     });
   }
-  centerOnFirstHero();
-  rerender();
+  if (mode === 'host') {
+    centerOnFirstHero();
+    rerender();
+  }
 
-  // Log any unresolved assets so the user sees the gap in the console.
   logMissingAssetsToConsole(assets, viewerRegistry());
 
-  // ── External integration: snapshot ingestion + action sending ─────────
+  // ── Snapshot ingestion (client) ─────────────────────────────────────────
+  function ensureClientTilesGenerated(snapshot) {
+    if (!clientWorld) return;
+    if (clientWorld.componentStores.get('Tile')?.size > 0) return;
+    // Pull the seed straight out of the incoming snapshot rather than the
+    // already-applied world state, because applySnapshot hasn't run yet.
+    const worldStateEntries = snapshot.components?.WorldState ?? {};
+    const firstEntry = Object.values(worldStateEntries)[0];
+    if (!firstEntry) return;
+    const seed = firstEntry.seed ?? 1337;
+    const width = firstEntry.mapWidth ?? 256;
+    const height = firstEntry.mapHeight ?? 256;
+    console.log('[client] generating ' + width + '×' + height + ' map from seed ' + seed);
+    const before = performance.now();
+    generateMap(clientWorld, clientRegistry, { width, height, seed, tilePrefabId: 'base/tile' });
+    invalidateTileIndex(clientWorld);
+    console.log('[client] map generated in ' + Math.round(performance.now() - before) + 'ms');
+  }
+
   function ingestSnapshot(snapshot) {
-    if (mode === 'host') return; // host owns the source of truth
+    if (mode === 'host') return;
+    const firstSnapshot = !(clientWorld.componentStores.get('Tile')?.size > 0);
+    ensureClientTilesGenerated(snapshot);
     GameRoom.applySnapshot(clientWorld, clientRegistry, snapshot);
     lastKnownPlayers = snapshot.players ?? lastKnownPlayers;
     if (selectedHeroEntityId != null && !clientWorld.entities.has(selectedHeroEntityId)) {
       selectedHeroEntityId = null;
     }
-    if (selectedHeroEntityId == null) centerOnFirstHero();
-    rerender();
-  }
-
-  function ingestHostSnapshotNotification(snapshot) {
-    // Host's own GameRoom calls broadcast(); the host doesn't ingest its
-    // own snapshot, it rerenders directly off the live world.
+    if (firstSnapshot) {
+      terrainManager.buildFromWorld(clientWorld);
+      centerOnFirstHero();
+    }
     rerender();
   }
 
   if (mode === 'host') {
-    // Re-render whenever the game room publishes (broadcast happens in
-    // parallel for clients).
+    // After the constructor finished, hook the broadcast so post-startup
+    // snapshots also trigger a host-side rerender.
     const originalBroadcast = net.broadcast;
     net.broadcast = (message) => {
-      if (message?.type === 'snapshot') ingestHostSnapshotNotification(message.snapshot);
+      if (message?.type === 'snapshot') rerender();
       originalBroadcast?.(message);
     };
   }
 
   function sendAction(action) {
-    if (mode === 'host') {
-      gameRoom.handleAction(myPlayerId, action);
-      return;
-    }
+    if (mode === 'host') { gameRoom.handleAction(myPlayerId, action); return; }
     net.sendAction?.(action);
   }
 
   function attemptEndTurn() {
     const world = viewerWorld();
     if (!world) return;
-    // Warn if the viewer still has heroes with movement points left.
     let stillHasMovement = false;
     forEachEntityWith(world, ['Movement', 'Ownership'], (entityId, movement, ownership) => {
       if (ownership.playerId !== myPlayerId) return;
       if (movement.movementLeft > 0) stillHasMovement = true;
     });
     if (stillHasMovement) {
-      const ok = hud.confirmEndTurn(
-        'You still have movement points remaining. End the day anyway?',
-      );
+      const ok = hud.confirmEndTurn('You still have movement points remaining. End the day anyway?');
       if (!ok) return;
     }
     sendAction({ name: 'end_turn' });
@@ -241,7 +260,6 @@ export function startGameSession({
     return mode === 'host' ? gameRoom.registry : clientRegistry;
   }
 
-  // Lets the host's net layer forward client actions into the GameRoom.
   function handleClientAction(fromPlayerId, action) {
     if (mode !== 'host' || !gameRoom) return;
     gameRoom.handleAction(fromPlayerId, action);
@@ -256,26 +274,33 @@ export function startGameSession({
   };
 }
 
-// Rebuild a step list's cumulativeCost field from terrain. We do this on the
-// viewer side because the snapshot only carries the steps — costs are easy
-// enough to recompute and saves wire bytes.
 function rebuildPathCosts(world, registry, startPosition, rawSteps) {
+  const tileStore = world.componentStores.get('Tile');
+  // Index built lazily — pathfinding may have already cached one on the world.
+  let index = world._tileIndex;
+  if (!index || world._tileIndexRegistryRef !== registry) {
+    index = new Map();
+    if (tileStore) {
+      for (const tile of tileStore.values()) {
+        const terrain = getTerrain(registry, tile.terrainId);
+        if (!terrain) continue;
+        index.set(tile.q + ',' + tile.r, { tile, terrain });
+      }
+    }
+    world._tileIndex = index;
+    world._tileIndexRegistryRef = registry;
+  }
+
   let running = 0;
   const out = [];
   for (const step of rawSteps) {
-    let terrainId = null;
-    forEachEntityWith(world, ['Tile'], (entityId, tile) => {
-      if (tile.q === step.q && tile.r === step.r) terrainId = tile.terrainId;
-    });
-    const terrain = terrainId ? getTerrain(registry, terrainId) : null;
-    running += terrain?.movementCost ?? 1;
+    const lookup = index.get(step.q + ',' + step.r);
+    running += lookup?.terrain?.movementCost ?? 1;
     out.push({ q: step.q, r: step.r, cumulativeCost: running });
   }
   return out;
 }
 
-// Build a list of declared asset references, marked exists / missing, for
-// the audit step. The asset loader knows which keys it actually has.
 function declarationListFor(registry, assets) {
   return registry.assetReferences.map(ref => ({
     moduleName: ref.moduleName,
