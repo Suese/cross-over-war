@@ -30,11 +30,21 @@ const $ = (id) => document.getElementById(id);
   } catch {}
 }
 
-// ── Auto-fill room code from ?room= ─────────────────────────────────────────
+// ── URL ?room= picks the lobby mode ─────────────────────────────────────────
+// Arrived via a join link → show only the Join section.
+// Fresh visit → show only the Host section (with a hidden code-paste fallback
+// surfaced via a tiny "have a code?" toggle below the host button).
 {
   const params = new URLSearchParams(window.location.search);
-  const r = params.get('room');
-  if (r) $('join-code').value = r;
+  const incomingRoom = params.get('room');
+  if (incomingRoom) {
+    $('join-code').value = incomingRoom;
+    $('lobby-host').style.display = 'none';
+    $('lobby-divider').style.display = 'none';
+  } else {
+    $('lobby-join').style.display = 'none';
+    $('lobby-divider').style.display = 'none';
+  }
 }
 
 // ── Lobby buttons ───────────────────────────────────────────────────────────
