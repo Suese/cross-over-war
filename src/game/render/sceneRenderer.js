@@ -139,9 +139,13 @@ export function createSceneRenderer(canvas) {
     applyCameraPlacement();
   }
   function handleResize() {
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
-    renderer.setSize(width, height, false);
+    // Use the window's own dimensions rather than canvas.clientWidth so the
+    // first call (which can run before layout has measured the canvas) still
+    // gets a correct size. updateStyle=true keeps the canvas CSS pinned to
+    // the matching pixel size as a belt-and-braces measure.
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    renderer.setSize(width, height, true);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
   }

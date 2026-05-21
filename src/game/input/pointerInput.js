@@ -90,23 +90,77 @@ export function installPointerInput(renderer, hooks) {
     renderer.zoomCamera(factor);
   }, { passive: false });
 
+  // ── Continuous WASD / arrow scrolling ──────────────────────────────────
+  // Track which pan keys are currently held and pan once per animation frame.
+  // Step is scaled by the current camera distance so the scroll feels the
+  // same speed whether zoomed in or out (covering roughly the same fraction
+  // of the visible viewport per second at any zoom).
+  const PAN_KEYS = new Map([
+    ['w', { dx: 0, dz: -1 }], ['ArrowUp',    { dx: 0, dz: -1 }],
+    ['s', { dx: 0, dz:  1 }], ['ArrowDown',  { dx: 0, dz:  1 }],
+    ['a', { dx: -1, dz: 0 }], ['ArrowLeft',  { dx: -1, dz: 0 }],
+    ['d', { dx:  1, dz: 0 }], ['ArrowRight', { dx:  1, dz: 0 }],
+  ]);
+  // Normalise so W and w both work.
+  function normaliseKey(key) {
+    if (key.length === 1) return key.toLowerCase();
+    return key;
+  }
+  const heldPanKeys = new Set();
+  let lastFrameTimeMs = performance.now();
+
+  function panEachFrame(nowMs) {
+    const deltaSeconds = Math.min(0.1, (nowMs - lastFrameTimeMs) / 1000);
+    lastFrameTimeMs = nowMs;
+    if (heldPanKeys.size > 0) {
+      let dx = 0, dz = 0;
+      for (const key of heldPanKeys) {
+        const dir = PAN_KEYS.get(key);
+        if (!dir) continue;
+        dx += dir.dx;
+        dz += dir.dz;
+      }
+      if (dx !== 0 || dz !== 0) {
+        // Speed = camera distance per second (so at distance 30 you cross
+        // ~30 world units in 1 s — about a full viewport).
+        const cameraDistance = renderer.camera.position.distanceTo(renderer.cameraTarget);
+        const speed = cameraDistance * 1.2;
+        const length = Math.hypot(dx, dz);
+        renderer.panCamera(
+          (dx / length) * speed * deltaSeconds,
+          (dz / length) * speed * deltaSeconds,
+        );
+      }
+    }
+    requestAnimationFrame(panEachFrame);
+  }
+  requestAnimationFrame(panEachFrame);
+
   document.addEventListener('keydown', (event) => {
-    // Ignore keys when focus is in an input.
     if (event.target && (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA')) return;
-    if (event.key === 'm' || event.key === 'M') {
+    const key = normaliseKey(event.key);
+    if (key === 'm') {
       hooks.onConfirmMove?.(null);
       lastPlannedDestinationKey = null;
       return;
     }
-    if (event.key === 'Escape') {
+    if (key === 'Escape') {
       hooks.onClearPath?.();
       lastPlannedDestinationKey = null;
       return;
     }
-    const panStep = 1.2;
-    if (event.key === 'w' || event.key === 'ArrowUp')    renderer.panCamera(0, -panStep);
-    if (event.key === 's' || event.key === 'ArrowDown')  renderer.panCamera(0,  panStep);
-    if (event.key === 'a' || event.key === 'ArrowLeft')  renderer.panCamera(-panStep, 0);
-    if (event.key === 'd' || event.key === 'ArrowRight') renderer.panCamera( panStep, 0);
+    if (PAN_KEYS.has(key)) {
+      heldPanKeys.add(key);
+      event.preventDefault();   // stop arrow keys from scrolling the page
+    }
   });
+
+  document.addEventListener('keyup', (event) => {
+    const key = normaliseKey(event.key);
+    if (PAN_KEYS.has(key)) heldPanKeys.delete(key);
+  });
+
+  // Drop held keys if the window loses focus — otherwise the camera keeps
+  // panning forever after the user alt-tabs.
+  window.addEventListener('blur', () => heldPanKeys.clear());
 }
