@@ -94,21 +94,33 @@ registerTerrain(registry, {
   id: 'grass',              // required, unique
   name: 'Grass',
   description: 'Open meadow. Easy going for any traveller on foot.', // shown in info panel
-  movementCost: 1,
-  traversableBy: ['land', 'air'],  // compositional — see below
+  components: {
+    PassableByLand: { cost: 1 },
+    PassableByAir:  { cost: 1 },
+  },
   fallbackColor: 0x7fbf5e,  // used by InstancedMesh material if no texture loads
   textureKey: 'base/grass.png', // optional — looked up in the asset loader
 });
 ```
 
-**`traversableBy`** is a list of movement-mode tags the terrain admits. Land,
-sea, and air are conventions used by the base module — there is no central
-registry of modes, so any module can introduce new ones (e.g. `'underground'`,
-`'astral'`) and any hero / unit that opts into the same tag becomes able to
-cross terrain that lists it. Pathfinding intersects the mover's modes against
-each terrain's `traversableBy`: at least one mode in common = passable. Heroes
-are implicitly land-only for now; when ships / fliers exist, give them an
-explicit `traversalModes` field and pass it through `findPath`.
+#### Traversal — `PassableBy<Mode>` on terrain, `Traverses<Mode>` on movers
+
+Traversability is fully compositional. Each terrain's `components` map holds
+zero or more `PassableBy<Mode>` entries, each carrying its own movement-point
+cost. Each mover (currently always a hero entity) carries `Traverses<Mode>`
+tag components. A mover can cross a terrain iff there exists a mode tag
+common to both sides; when several modes match, the pathfinder picks the
+cheapest one.
+
+The base module declares three modes — `Land`, `Water`, `Air` — but nothing
+in the engine enumerates them. To add an `Underground` traversal, register
+new terrain with `PassableByUnderground: { cost: N }` and have whichever
+units need it carry `TraversesUnderground`; no engine code changes.
+
+See `src/game/ecs/traversal.js` for the two helpers every consumer goes
+through: `collectTraversalModes(world, entityId)` returns the mover's mode
+tags, `resolveTerrainCost(terrain, modes)` returns the cheapest matching
+cost — or `null` if the mover cannot enter at all.
 
 The renderer (`src/game/render/terrainInstances.js`) creates one `InstancedMesh`
 per registered terrain id. So **a new terrain id = a new draw call**. Don't go
@@ -302,6 +314,7 @@ extend a base prefab, you should know what's already on it.
 | `Movement`       | `base/hero`            | `movementMax`, `movementLeft`, `plannedPath` (`{ steps, costs }` or null) |
 | `Ownership`      | `base/hero`            | `playerId`                                                             |
 | `BlocksMovement` | `base/hero`            | empty tag — any entity carrying it occupies its hex for pathfinding    |
+| `Traverses<Mode>`| `base/hero`            | empty tag (e.g. `TraversesLand`) — the mover can cross terrain that declares `PassableBy<Mode>` |
 | `MapObject`      | map-object prefabs     | `typeId` — selects the registered type for rendering and visit logic   |
 | `Collectable`    | collectable prefabs    | `message` — text shown in the Okay dialog when a hero visits the tile  |
 | `WorldState`     | `gameRoom.js`          | `turn`, `activePlayerId`, `fogByPlayer`, `playerSlots`, …              |

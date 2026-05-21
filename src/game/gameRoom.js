@@ -24,7 +24,8 @@ import {
   flattenFog, inflateFog,
 } from './map/fog.js';
 import { generateMap, findSpawnHex } from './map/mapgen.js';
-import { findPath, invalidateTileIndex, terrainSupportsAnyMode } from './map/pathfinding.js';
+import { findPath, invalidateTileIndex } from './map/pathfinding.js';
+import { collectTraversalModes, resolveTerrainCost } from './ecs/traversal.js';
 import { hashWorld, MESSAGE_KINDS } from './protocol.js';
 import { writeSave, newSaveId } from './persistence.js';
 
@@ -329,7 +330,10 @@ export class GameRoom {
     const goal = { q: action.goalQ, r: action.goalR };
     const exploredKeys = this._playerExploredSet(playerId);
     const blockedKeys = collectBlockedKeysExcluding(this.world, heroEntityId);
-    const path = findPath(this.world, this.registry, position, goal, { exploredKeys, blockedKeys });
+    const traversalModes = collectTraversalModes(this.world, heroEntityId);
+    const path = findPath(this.world, this.registry, position, goal, {
+      exploredKeys, blockedKeys, traversalModes,
+    });
     if (path) {
       patchComponentTracked(this.world, heroEntityId, 'Movement', ['plannedPath'], { steps: path.steps });
       events.push({ type: 'path_planned', heroEntityId, goal });
@@ -365,6 +369,7 @@ export class GameRoom {
     const fromR = position.r;
     const exploredKeys = this._playerExploredSet(playerId);
     const blockedKeys = collectBlockedKeysExcluding(this.world, heroEntityId);
+    const traversalModes = collectTraversalModes(this.world, heroEntityId);
     const stepsRemaining = plan.steps.slice();
     const consumedPath = [];
     while (stepsRemaining.length > 0) {
@@ -376,8 +381,8 @@ export class GameRoom {
       // Re-checked each step in case the world state changed since planning.
       if (blockedKeys.has(nextKey)) break;
       const terrain = getTerrain(this.registry, this._terrainAt(next.q, next.r));
-      if (!terrainSupportsAnyMode(terrain, ['land'])) break;
-      const cost = terrain.movementCost;
+      const cost = resolveTerrainCost(terrain, traversalModes);
+      if (cost == null) break;
       if (movement.movementLeft < cost) break;
       patchComponentTracked(this.world, heroEntityId, 'Movement', ['movementLeft'], movement.movementLeft - cost);
       patchComponentTracked(this.world, heroEntityId, 'Position', ['q'], next.q);

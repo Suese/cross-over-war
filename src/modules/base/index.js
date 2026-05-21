@@ -31,8 +31,10 @@ export default {
       id: 'grass',
       name: 'Grass',
       description: 'Open meadow. Easy going for any traveller on foot.',
-      movementCost: 1,
-      traversableBy: ['land', 'air'],
+      components: {
+        PassableByLand: { cost: 1 },
+        PassableByAir: { cost: 1 },
+      },
       fallbackColor: 0x7fbf5e,
       textureKey: 'base/grass.png',
     });
@@ -47,8 +49,10 @@ export default {
       id: 'water',
       name: 'Water',
       description: 'Open sea. Ships sail freely; fliers cross overhead. No footing for a land army.',
-      movementCost: 2,
-      traversableBy: ['sea', 'air'],
+      components: {
+        PassableByWater: { cost: 1 },
+        PassableByAir: { cost: 1 },
+      },
       fallbackColor: 0x4b94c4,
       textureKey: 'base/water.png',
     });
@@ -63,8 +67,10 @@ export default {
       id: 'mountain',
       name: 'Mountain',
       description: 'Steep slopes and broken rock. Slow going on foot; trivial for anything that flies.',
-      movementCost: 3,
-      traversableBy: ['land', 'air'],
+      components: {
+        PassableByLand: { cost: 3 },
+        PassableByAir: { cost: 1 },
+      },
       fallbackColor: 0x8a7c6a,
       textureKey: 'base/mountain.png',
     });
@@ -112,6 +118,10 @@ export default {
       // (towns, garrisons, treasure piles) can add the same component to
       // make them obstacles without the engine needing a hardcoded list.
       addComponent(world, entityId, 'BlocksMovement', {});
+      // Atomic traversal tags. Heroes are land units; an amphibious archetype
+      // would simply also attach a TraversesWater here. The pathfinder picks
+      // up whichever Traverses* tags an entity carries.
+      addComponent(world, entityId, 'TraversesLand', {});
       return entityId;
     });
 

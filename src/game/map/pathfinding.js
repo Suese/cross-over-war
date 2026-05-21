@@ -1,11 +1,10 @@
 // A* over the hex grid. Tile data is read out of the ECS world: each tile
 // entity has a Tile component (q, r, terrainId), and the registry tells us
-// each terrain's movement cost plus which traversal modes it supports
-// (land / sea / air / …). A caller asks for a path with a list of modes the
-// mover can use; a tile is passable iff one of the mover's modes appears in
-// the terrain's `traversableBy` list. Heroes are land units for now, so
-// findPath defaults to ['land'] — change the default in one place when
-// ships/fliers appear.
+// each terrain's traversal components (PassableByLand, PassableByAir, …)
+// with their per-mode costs. The mover supplies a list of mode tags (e.g.
+// ['Land']) — the pathfinder calls `resolveTerrainCost(terrain, modes)` per
+// candidate tile, picking the lowest-cost matching mode or skipping the
+// tile if none match. See ecs/traversal.js for the compositional rules.
 //
 // Cost units are "movement points" — a hero with movementMax=20 can spend up
 // to 20 points worth of terrain on a turn. We return both the path and a
@@ -15,6 +14,7 @@
 import { HEX_DIRECTIONS, hexKey, hexDistance } from './hex.js';
 import { forEachEntityWith, getComponent } from '../ecs/world.js';
 import { getTerrain } from '../ecs/registry.js';
+import { resolveTerrainCost } from '../ecs/traversal.js';
 
 // Build (or reuse) a hex-key → { entityId, tile, terrain } lookup over every
 // Tile entity. The 256×256 default map has 65 000 entries, so caching this on
@@ -39,14 +39,6 @@ function getOrBuildTileIndex(world, registry) {
 export function invalidateTileIndex(world) {
   world._tileIndex = null;
   world._tileIndexRegistryRef = null;
-}
-
-// Re-exported so consumers (mapgen, gameRoom, UI) check traversability through
-// the same predicate the pathfinder uses.
-export function terrainSupportsAnyMode(terrain, modes) {
-  if (!terrain?.traversableBy) return false;
-  for (const mode of modes) if (terrain.traversableBy.includes(mode)) return true;
-  return false;
 }
 
 // Minimal priority queue (binary heap) keyed by numeric priority.
@@ -102,12 +94,12 @@ export function findPath(world, registry, start, goal, options = {}) {
   if (!start || !goal) return null;
   if (start.q === goal.q && start.r === goal.r) return { steps: [], costs: [] };
 
-  const traversalModes = options.traversalModes ?? ['land'];
+  const traversalModes = options.traversalModes ?? ['Land'];
   const blocked = options.blockedKeys;
   const tileIndex = getOrBuildTileIndex(world, registry);
   const goalKey = hexKey(goal.q, goal.r);
   const goalTile = tileIndex.get(goalKey);
-  if (!goalTile || !terrainSupportsAnyMode(goalTile.terrain, traversalModes)) return null;
+  if (!goalTile || resolveTerrainCost(goalTile.terrain, traversalModes) == null) return null;
   if (blocked && blocked.has(goalKey)) return null;
 
   const explored = options.exploredKeys;
@@ -133,10 +125,11 @@ export function findPath(world, registry, start, goal, options = {}) {
       const nextR = currentR + direction.r;
       const nextKey = hexKey(nextQ, nextR);
       const nextTile = tileIndex.get(nextKey);
-      if (!nextTile || !terrainSupportsAnyMode(nextTile.terrain, traversalModes)) continue;
+      if (!nextTile) continue;
+      const stepCost = resolveTerrainCost(nextTile.terrain, traversalModes);
+      if (stepCost == null) continue;
       if (explored && !explored.has(nextKey)) continue;
       if (blocked && blocked.has(nextKey)) continue;
-      const stepCost = nextTile.terrain.movementCost ?? 1;
       const newCost = costSoFar.get(currentKey) + stepCost;
       const previousBest = costSoFar.get(nextKey);
       if (previousBest !== undefined && newCost >= previousBest) continue;

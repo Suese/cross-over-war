@@ -28,6 +28,7 @@ import { installHudOverlay } from './ui/hudOverlay.js';
 import { installInfoOverlay } from './ui/infoOverlay.js';
 import { showOkay, showYesNo } from './ui/dialogs.js';
 import { findPath, estimateTurnsForPath, invalidateTileIndex } from './map/pathfinding.js';
+import { collectTraversalModes, resolveTerrainCost, listPassableModes } from './ecs/traversal.js';
 import { generateMap } from './map/mapgen.js';
 import { inflateFog } from './map/fog.js';
 import { hashWorld, MESSAGE_KINDS } from './protocol.js';
@@ -128,7 +129,10 @@ export function startGameSession({
         return;
       }
       const blockedKeys = collectBlockedKeysExcluding(viewerWorld(), heroId);
-      const path = findPath(viewerWorld(), viewerRegistry(), position, hex, { exploredKeys, blockedKeys });
+      const traversalModes = collectTraversalModes(viewerWorld(), heroId);
+      const path = findPath(viewerWorld(), viewerRegistry(), position, hex, {
+        exploredKeys, blockedKeys, traversalModes,
+      });
       if (!path || path.steps.length === 0) {
         cursorHud.show(event.clientX, event.clientY, '·');
         return;
@@ -199,7 +203,8 @@ export function startGameSession({
       const movement = getComponent(world, heroId, 'Movement');
       const plan = movement?.plannedPath;
       if (plan && plan.steps?.length) {
-        const enriched = rebuildPathCosts(world, viewerRegistry(), position, plan.steps);
+        const traversalModes = collectTraversalModes(world, heroId);
+        const enriched = rebuildPathCosts(world, viewerRegistry(), position, plan.steps, traversalModes);
         renderer.showPath({
           startQ: position.q,
           startR: position.r,
@@ -446,24 +451,35 @@ export function startGameSession({
     return sections.join('<div style="height:8px"></div>');
   }
 
-  function buildHeroSection({ hero, ownerPlayerName, isViewerOwned }) {
+  function buildHeroSection({ entityId, hero, ownerPlayerName, isViewerOwned }) {
     const ownerLine = ownerPlayerName
       ? plainLine('<span style="opacity:0.75">' + (isViewerOwned ? 'Your hero' : 'Owned by ' + escapeHtml(ownerPlayerName)) + '</span>')
       : '';
-    return sectionTitle(hero.name ?? 'Hero', '#a8e6ff') + ownerLine;
+    const modes = collectTraversalModes(viewerWorld(), entityId);
+    const modesLine = modes.length
+      ? plainLine('Traverses: <span style="color:#a8e6ff">' + modes.map(humaniseMode).join(', ') + '</span>')
+      : '';
+    return sectionTitle(hero.name ?? 'Hero', '#a8e6ff') + ownerLine + modesLine;
   }
 
   function buildTerrainSection(terrain) {
-    const traversal = (terrain.traversableBy ?? []).map(humaniseMode);
-    const traversalLine = traversal.length
-      ? 'Traversable by: <span style="color:#a8e6ff">' + traversal.join(', ') + '</span>'
-      : 'Traversable by: <span style="color:#ff8484">— none —</span>';
+    const passable = listPassableModes(terrain);
+    const traversalBody = passable.length
+      ? '<div style="margin-top:2px">'
+        + passable.map(entry =>
+            '<div style="margin-left:6px">'
+            + humaniseMode(entry.mode)
+            + ': <span style="color:#a8e6ff">' + entry.cost + ' mp</span>'
+            + '</div>',
+          ).join('')
+        + '</div>'
+      : '<div style="color:#ff8484">Impassable</div>';
     const description = terrain.description
       ? '<div style="opacity:0.8; margin-top:4px">' + escapeHtml(terrain.description) + '</div>'
       : '';
     return sectionTitle(terrain.name ?? terrain.id, '#7fffa8')
-      + plainLine('Move cost: ' + (terrain.movementCost ?? '?'))
-      + plainLine(traversalLine)
+      + '<div>Traversal:</div>'
+      + traversalBody
       + description;
   }
 
@@ -620,7 +636,7 @@ function collectBlockedKeysExcluding(world, excludeEntityId) {
   return blocked;
 }
 
-function rebuildPathCosts(world, registry, startPosition, rawSteps) {
+function rebuildPathCosts(world, registry, startPosition, rawSteps, traversalModes) {
   const tileStore = world.componentStores.get('Tile');
   let index = world._tileIndex;
   if (!index || world._tileIndexRegistryRef !== registry) {
@@ -636,11 +652,13 @@ function rebuildPathCosts(world, registry, startPosition, rawSteps) {
     world._tileIndexRegistryRef = registry;
   }
 
+  const modes = traversalModes?.length ? traversalModes : ['Land'];
   let running = 0;
   const out = [];
   for (const step of rawSteps) {
     const lookup = index.get(step.q + ',' + step.r);
-    running += lookup?.terrain?.movementCost ?? 1;
+    const cost = resolveTerrainCost(lookup?.terrain, modes);
+    running += cost ?? 1;
     out.push({ q: step.q, r: step.r, cumulativeCost: running });
   }
   return out;

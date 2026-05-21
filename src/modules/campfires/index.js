@@ -23,6 +23,7 @@ import {
   spawnFromPrefab,
 } from '../../game/ecs/registry.js';
 import { forEachEntityWith } from '../../game/ecs/world.js';
+import { resolveTerrainCost } from '../../game/ecs/traversal.js';
 import { hexKey } from '../../game/map/hex.js';
 
 const MODULE_NAME = 'campfires';
@@ -65,7 +66,7 @@ export default {
       const candidates = [];
       forEachEntityWith(world, ['Tile'], (_entityId, tile) => {
         const terrain = getTerrain(reg, tile.terrainId);
-        if (!terrain?.traversableBy?.includes('land')) return;
+        if (resolveTerrainCost(terrain, ['Land']) == null) return;
         const key = hexKey(tile.q, tile.r);
         if (occupiedHexes.has(key)) return;
         candidates.push({ q: tile.q, r: tile.r });
