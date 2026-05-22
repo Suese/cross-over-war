@@ -89,6 +89,13 @@ export function registerWorldSpawner(registry, spawnerFn) {
 // BiomeAnchor component on the castle entity; the engine runs each
 // decorator once over the hexes assigned to its anchor.
 //
+// definition:
+//   id           : string                  — unique decorator id
+//   baseTerrainId: string (optional)       — terrain a road carver should
+//                                            reduce a worked tile to within
+//                                            this biome. Defaults to 'plains'.
+//   decorate     : (context) => void       — the decorator function
+//
 // The `decorate` function receives a context object:
 //   {
 //     world, registry,

@@ -31,16 +31,20 @@ remove the module entirely.
 
 ```js
 // src/modules/example/index.js
-import { createEntity, addComponent } from '../../game/ecs/world.js';
 import {
-  registerTerrain,
-  registerPrefab,
-  registerHero,
-  registerMapObjectType,
-  registerWorldSpawner,
-  declareAssetReference,
-  spawnFromPrefab,
-} from '../../game/ecs/registry.js';
+  // ECS world
+  createEntity, addComponent,
+  // Registry hooks
+  registerTerrain, registerPrefab, registerHero, registerMapObjectType,
+  registerWorldSpawner, registerBiomeDecorator, setBaseDecorator,
+  declareAssetReference, spawnFromPrefab,
+  // Hex + path utilities
+  hexKey, hexDistance, findPath,
+  // Compositional helpers
+  resolveTerrainCost, resolveWorkableCost,
+  // Noise
+  createSeededNoise2D, fractalNoise2D,
+} from '../../game/api.js';
 
 export default {
   name: 'example',           // must match the folder name
@@ -73,6 +77,13 @@ A module's `register()` runs at **startup only**, in dependency order. It
 should not mutate the world; it should declare things on the registry. The
 world is populated later by `gameRoom.js` (host) or by the snapshot the host
 ships (client).
+
+> **Import from `src/game/api.js`, not the engine internals.** That file
+> re-exports every helper modules are allowed to use — the ECS world, the
+> registry, hex math, pathfinding, traversal, and the perlin noise. If you
+> need to import something that *isn't* re-exported there, that's a sign the
+> module-author contract needs to grow: add the export to `api.js` (and
+> document it here) in the same change.
 
 ### Dependencies and load order
 
@@ -107,15 +118,17 @@ points at one of these.
 
 ```js
 registerTerrain(registry, {
-  id: 'grass',
-  name: 'Grass',
-  description: 'Open meadow. Easy going for any traveller on foot.',
+  id: 'grassy-hills',
+  name: 'Grassy Hills',
+  description: 'Rolling slopes of knee-high grass. Slower than open plain.',
   components: {
-    PassableByLand: { cost: 1 },
-    PassableByAir:  { cost: 1 },
+    PassableByLand:   { cost: 7 },
+    PassableByAir:    { cost: 1 },
+    WorkableTerrain:  { cost: 2 },   // optional — see "Workable terrain"
   },
-  fallbackColor: 0x7fbf5e,
-  textureKey: 'base/grass.png',
+  fallbackColor: 0x6ea84a,
+  modelKey:   'base/grassy-hills.glb',  // preferred — 3D tile model
+  textureKey: 'base/grass.png',         // optional — used by the cylinder fallback
 });
 ```
 
@@ -124,13 +137,52 @@ registerTerrain(registry, {
 | `id`           | Unique within the registry; namespace by module.               |
 | `name`         | Shown in the right-click info panel.                           |
 | `description`  | Optional flavour text shown in the info panel.                 |
-| `components`   | Map of `PassableBy<Mode>: { cost: N }` entries. See [Traversal](#traversal). |
-| `fallbackColor`| `THREE.Color`-compatible hex. Used by the InstancedMesh material when the texture is missing. |
-| `textureKey`   | Optional asset-loader key for the texture.                     |
+| `components`   | Map of `PassableBy<Mode>: { cost: N }` entries plus, optionally, `WorkableTerrain: { cost: N }`. See [Traversal](#traversal) and [Workable terrain](#workable-terrain). |
+| `modelKey`     | Optional asset-loader key for a `.glb` / `.gltf` tile model. When set, the renderer walks the GLB scene and creates one `InstancedMesh` per submesh; the submesh's local transform is baked into each instance, so a hex base with trees-on-top still tiles correctly. |
+| `fallbackColor`| `THREE.Color`-compatible hex. Used by the cylinder fallback when no `modelKey` is set or the model is missing. |
+| `textureKey`   | Optional asset-loader key for a texture. Wraps the cylinder fallback only — ignored when a `modelKey` model is present. |
 
-The renderer creates one `InstancedMesh` per registered terrain id — a new
-terrain id costs one draw call. Terrains are flavours like grass / desert /
-lava, not per-tile decorations.
+The renderer creates one `InstancedMesh` per submesh per terrain id, so a
+forest tile with `base + trunk + canopy` submeshes draws as three
+InstancedMeshes covering every forest tile on the map. Total draw-call count
+stays in the low double digits even for 65 000-tile maps. Terrains are
+flavours like grass / desert / lava — not per-tile decorations.
+
+### Tile models (`.glb`) and streaming
+
+Models are **streamed on demand** — nothing is fetched until something on
+screen asks for it. The terrain renderer immediately lays down a placeholder
+grey cylinder for every tile (so the map reads as "loading" rather than
+empty) and kicks off a background load for each terrain's `modelKey`. When
+a GLB arrives, that terrain's placeholder InstancedMeshes are torn down and
+rebuilt from the loaded scene's submeshes, with fog state re-applied. The
+swap is per-terrain — fast terrains pop in before slow ones.
+
+Map objects and heroes are likewise built only after the local viewer first
+discovers the entity (visible or explored). A point of interest that the
+player never walks near never triggers an asset load on that player's
+machine.
+
+Tile models should be authored as a hex of **radius 1** (vertex-to-centre
+distance) centred at the origin, with the ground at `y = 0` and any vertical
+detail (trees, peaks) rising in `+y`. Pointy-top orientation matches the
+engine's axial → pixel math; no rotation is applied. If you ship a model at
+a different scale, scale it back inside the GLB rather than in code — the
+engine treats each terrain id's submeshes uniformly.
+
+### Memory pressure & LRU eviction
+
+The asset loader keeps a refcount per loaded model. Meshes that mount a
+GLB call `acquireModel(key)` once and `releaseModel(key)` when they leave
+the scene; tile InstancedMeshes pin their terrain's model for the lifetime
+of the map, while per-entity meshes (heroes, GLB-backed map objects)
+release as soon as the entity is destroyed.
+
+When the count of loaded models exceeds the cap (default 32, configurable
+via `assets.setMaxLoadedModels(n)`), the loader disposes the *oldest
+refcount-zero* models — geometries and materials are freed and the cache
+entry is dropped. The next request for an evicted asset re-downloads and
+re-streams the same way as a first request.
 
 ### Prefabs — `registerPrefab(registry, prefabId, spawn)`
 
@@ -229,6 +281,7 @@ spawn whatever map objects / collectables they want.
 ```js
 registerBiomeDecorator(registry, {
   id: 'mymod/forest-biome',
+  baseTerrainId: 'plains',          // optional — see "Road carving" below
   decorate({
     world, registry,
     anchorEntityId, anchorQ, anchorR,
@@ -240,6 +293,12 @@ registerBiomeDecorator(registry, {
   },
 });
 ```
+
+| Field          | Description                                                                            |
+|----------------|----------------------------------------------------------------------------------------|
+| `id`           | Unique decorator id; modules reference this through the castle prefab's `BiomeAnchor`. |
+| `baseTerrainId`| Optional terrain id the road carver should reduce worked hexes to inside this biome. Defaults to `'plains'`. Should be a terrain whose `components` include `WorkableTerrain` so subsequent carves stay cheap. |
+| `decorate`     | The decorator function.                                                                |
 
 Castles reference a decorator via the `BiomeAnchor { decoratorId }`
 component their prefab attaches. Additional biome anchors are created by
@@ -322,6 +381,7 @@ assembled by attaching atomic components to entities — usually inside a prefab
 | `Conquerable`     | Empty tag — visiting the entity transfers `Ownership` to the visiting player. The hover layer and info panel show a colored `⚑` flag and "Owned by [name]" in the owner's player colour. |
 | `Ownership`       | `{ playerId }` — who controls this entity. Used by heroes; also attached to Conquerable map objects after capture. |
 | `TerrainOverride` | `{ terrainId }` — per-hex swap to a different registered terrain. Pathfinder and renderer both treat the override as the effective terrain (visual + passability come from the referenced definition). |
+| `AssetReference` | `{ modelKey }` — tells the renderer "this entity's visual is this `.glb`". The renderer puts a grey placeholder on screen, requests the model, and swaps the placeholder for the GLB scene once the bytes arrive. Use this on map-object prefabs whose appearance is GLB-driven; procedural meshes can keep using the type's `buildMesh` instead. |
 | `Castle`          | Empty tag — marks an entity as a castle. End-of-week defeat check counts these per player; any player with zero owned castles is vanquished and loses all their heroes. |
 | `BiomeAnchor`     | `{ decoratorId, radius }` — the entity anchors a biome. The engine assigns every tile within `radius` (and nearer to this anchor than any other) to this biome, then invokes the named decorator on that hex set. Castles all get one; the engine creates additional standalone `BiomeAnchor` entities for the "additional biomes" lobby setting. |
 | `BlocksMovement`  | Empty tag — the hex this entity is on is treated as occupied for pathfinding (heroes, big props). |
@@ -510,13 +570,74 @@ in the engine enumerates them. To add an `Underground` traversal, register
 new terrain with `PassableByUnderground: { cost: N }` and have whichever
 units need it carry `TraversesUnderground`; no engine code changes.
 
-Two helpers in `src/game/ecs/traversal.js` are what every consumer goes
-through:
+Three helpers (re-exported by `src/game/api.js`) are what every consumer
+goes through:
 
 - `collectTraversalModes(world, entityId)` — returns the mover's mode tags.
 - `resolveTerrainCost(terrain, modes)` — cheapest matching cost, or `null` if
   the mover cannot enter at all.
 - `listPassableModes(terrain)` — every `{ mode, cost }` for the info panel.
+
+---
+
+## Workable terrain
+
+`WorkableTerrain { cost: N }` is an optional entry inside a terrain's
+`components` map that declares "this terrain can be cleared / smoothed
+back to the biome's base terrain at this cost". The road carver consults
+it during map generation:
+
+- **Workable** (has `WorkableTerrain`): plains, grass, forest, forest hills,
+  dusty hills. Roads route through here at the listed cost.
+- **Unworkable** (no `WorkableTerrain`): mountain cliffs, deep / shallow
+  ocean, bramble walls. Intra-biome carving won't enter them at all;
+  inter-biome carving will only enter them as a last resort.
+
+Read it through `resolveWorkableCost(terrain)` — returns the cost or
+`null` for unworkable terrain. Treat it as completely orthogonal to
+`PassableBy<Mode>`: traversal is "can a hero walk through this", workable
+is "can a road be carved through this".
+
+## Pathfinding
+
+`findPath(world, registry, start, goal, options)` runs A* over the hex
+grid. Modules can call it any time after map generation. Options:
+
+| Option            | Meaning                                                                              |
+|-------------------|--------------------------------------------------------------------------------------|
+| `traversalModes`  | `string[]` (default `['Land']`). The mover's mode tags. Used when `costFn` is omitted. |
+| `costFn`          | `(terrain, q, r) => number \| null` — custom cost function. Return `null` to mark a tile impassable. Used by the road carver to apply a different cost rule (workable / water / unworkable) than traversal modes. |
+| `exploredKeys`    | Optional `Set<"q,r">`. When provided, undiscovered tiles are treated as impassable. |
+| `blockedKeys`    | Optional `Set<"q,r">`. Tiles occupied by other heroes / `BlocksMovement` entities.   |
+
+Two helper functions sit on top:
+
+- `splitPathByMovementBudget(path, movementLeft)` — splits the returned
+  path into the part the hero can reach this turn and the rest.
+- `estimateTurnsForPath(path, movementPerTurn)` — how many turns to
+  consume the whole thing.
+
+If you start adding or removing `TerrainOverride` entities at runtime,
+call `invalidateTileIndex(world)` so the pathfinder rebuilds its tile
+lookup cache.
+
+## Road carving (host map generation only)
+
+After the three decoration passes the host runs two more passes that lay
+down a road network. Modules don't call this — the engine does — but the
+behaviour interacts with `WorkableTerrain` and biome decorators in ways
+worth knowing:
+
+| Pass | Purpose                                                                                  |
+|------|------------------------------------------------------------------------------------------|
+| 4    | **Intra-biome roads** — for every biome anchor, A* from the anchor to every POI in the biome through workable terrain only. Each step on the chosen path is reduced to the biome's `baseTerrainId` (`'plains'` if not set). Cumulative across POIs so trunk roads emerge. |
+| 5    | **Inter-biome roads** — connect every castle to every other castle. Uses a cost function that prefers workable land, allows sea hops at a small premium, and falls back to `1000` mp per hex through bramble / mountain cliffs only when nothing else works. Each path sees the terrain after every previous carve, so paths merge. Carving destroys any `TerrainOverride` along the route, so the road actually appears. |
+
+If your biome decorator chooses an exotic base — say `lava-glass` instead
+of `plains` — register the base as a workable terrain (`WorkableTerrain`
+component) and declare it as the decorator's `baseTerrainId`. The road
+carver will then route happily through your biome and leave a coherent
+trail.
 
 ---
 
@@ -755,9 +876,20 @@ The asset loader (`src/game/modules/assetLoader.js`) exposes:
 
 - `hasAsset(key)` — quick check; doesn't trigger a load
 - `getTexture(key, { requestedBy })` — synchronous; returns a `THREE.Texture`
-  or null and logs to the "missing" list
-- `loadModel(key, { requestedBy })` — async; resolves to a `THREE.Group` or
-  null
+  handle. Three.js patches the image onto the handle when the load completes,
+  so a material bound to the handle picks up the bytes automatically.
+- `loadTextureAsync(key, { requestedBy })` — promise variant; resolves once
+  the image bytes arrive.
+- `requestModel(key, onLoad, { requestedBy })` — streaming request. Callback
+  fires with the scene root when loaded (or `null` if missing / failed).
+  Returns the cached scene synchronously if already loaded, otherwise `null`.
+- `loadModel(key, { requestedBy })` — promise wrapper around `requestModel`.
+- `getModel(key)` — sync accessor; the cached scene or `null` (no load).
+- `getModelState(key)` — `'missing' | 'unloaded' | 'loading' | 'loaded' | 'failed'`.
+- `acquireModel(key)` / `releaseModel(key)` — refcount the loaded model so
+  the LRU eviction pass leaves it alone while a live mesh references it.
+- `setMaxLoadedModels(n)` — tune the LRU cap (default 32). Eviction runs
+  after each successful load.
 
 `requestedBy` is a free-text breadcrumb that flows through to the missing-asset
 log so you can tell which subsystem asked for the file.

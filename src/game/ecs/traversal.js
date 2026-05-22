@@ -68,3 +68,14 @@ export function listPassableModes(terrain) {
   }
   return out;
 }
+
+// Cost to "work" a tile — to clear or smooth it back to the biome's base
+// terrain when carving a road. Terrain definitions opt in by including a
+// `WorkableTerrain: { cost: N }` entry in their `components` map. Returns
+// null when the terrain has no WorkableTerrain entry (water, mountain
+// cliffs, bramble walls — the engine treats those as unworkable).
+export function resolveWorkableCost(terrain) {
+  const workable = terrain?.components?.WorkableTerrain;
+  if (!workable) return null;
+  return workable.cost ?? 1;
+}

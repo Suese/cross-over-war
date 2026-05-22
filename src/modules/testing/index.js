@@ -63,14 +63,14 @@ const HUT_FOOTPRINT_OFFSETS = [
   { dq:  0, dr: -1 },   // NW
 ];
 
-// Castle footprint: a ring of six bramble hexes around the central POI tile.
+// Castle footprint: a ring of bramble hexes around the central POI tile.
+// SE is left open so heroes can approach the keep on foot (the gate hex).
 const CASTLE_FOOTPRINT_OFFSETS = [
   { dq:  1, dr:  0 },   // E
   { dq: -1, dr:  0 },   // W
   { dq:  1, dr: -1 },   // NE
   { dq:  0, dr: -1 },   // NW
   { dq: -1, dr:  1 },   // SW
-  { dq:  0, dr:  1 },   // SE
 ];
 
 // Decorator densities — biome content scales with the number of hexes
@@ -183,6 +183,8 @@ export default {
     // ── Biome decorator ─────────────────────────────────────────────────
     registerBiomeDecorator(registry, {
       id: CASTLE_BIOME_DECORATOR_ID,
+      // Road carver reduces worked tiles inside this biome back to plains.
+      baseTerrainId: 'plains',
       decorate({ world, registry: reg, anchorQ, anchorR, biomeHexes, seed, occupiedHexes }) {
         // Seed the noise field per-castle so neighbouring biomes don't end
         // up with identical patterns sitting next to each other.

@@ -101,17 +101,26 @@ class PriorityQueue {
 // options.blockedKeys: Set<"q,r"> — tiles occupied by other heroes / map
 // objects. The start tile must NOT be in this set (callers exclude their own
 // hero's position). The goal counts as blocked too — no walking into a hero.
+// options.traversalModes: string[] — the mover's mode tags (e.g. ['Land']).
+//   Ignored when options.costFn is provided.
+// options.costFn(terrain, q, r): number | null — custom cost rule. Return
+//   the step cost or null for impassable. Used by the road carver to pick
+//   different costs for workable land vs water vs unworkable terrain. When
+//   omitted, the default cost is `resolveTerrainCost(terrain, traversalModes)`.
 export function findPath(world, registry, start, goal, options = {}) {
   if (!start || !goal) return null;
   if (start.q === goal.q && start.r === goal.r) return { steps: [], costs: [] };
 
   const traversalModes = options.traversalModes ?? ['Land'];
+  const customCostFn = typeof options.costFn === 'function' ? options.costFn : null;
+  const stepCostFor = (terrain, q, r) =>
+    customCostFn ? customCostFn(terrain, q, r) : resolveTerrainCost(terrain, traversalModes);
   const blocked = options.blockedKeys;
   const tileIndex = getOrBuildTileIndex(world, registry);
   const goalKey = hexKey(goal.q, goal.r);
   const goalTile = tileIndex.get(goalKey);
   const goalCarrier = goalTile?.effectiveTerrain ?? goalTile?.terrain;
-  if (!goalCarrier || resolveTerrainCost(goalCarrier, traversalModes) == null) return null;
+  if (!goalCarrier || stepCostFor(goalCarrier, goal.q, goal.r) == null) return null;
   if (blocked && blocked.has(goalKey)) return null;
 
   const explored = options.exploredKeys;
@@ -138,7 +147,7 @@ export function findPath(world, registry, start, goal, options = {}) {
       const nextKey = hexKey(nextQ, nextR);
       const nextTile = tileIndex.get(nextKey);
       if (!nextTile) continue;
-      const stepCost = resolveTerrainCost(nextTile.effectiveTerrain ?? nextTile.terrain, traversalModes);
+      const stepCost = stepCostFor(nextTile.effectiveTerrain ?? nextTile.terrain, nextQ, nextR);
       if (stepCost == null) continue;
       if (explored && !explored.has(nextKey)) continue;
       if (blocked && blocked.has(nextKey)) continue;

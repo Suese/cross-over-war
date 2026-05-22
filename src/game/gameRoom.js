@@ -23,7 +23,7 @@ import {
   createWorld, createEntity, addComponent, getComponent, hasComponent, getWorldState,
   forEachEntityWith, collectEntitiesWith, setChangeRecording, consumePendingChanges,
   setComponentTracked, patchComponentTracked, createTrackedEntity,
-  destroyTrackedEntity,
+  destroyTrackedEntity, destroyEntity,
 } from './ecs/world.js';
 import { createRegistry, getTerrain, spawnFromPrefab } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
@@ -33,7 +33,7 @@ import {
 } from './map/fog.js';
 import { generateMap } from './map/mapgen.js';
 import { findPath, invalidateTileIndex } from './map/pathfinding.js';
-import { collectTraversalModes, resolveTerrainCost } from './ecs/traversal.js';
+import { collectTraversalModes, resolveTerrainCost, resolveWorkableCost } from './ecs/traversal.js';
 import { hexKey, hexDistance, hexesInRadius, HEX_DIRECTIONS } from './map/hex.js';
 import { hashWorld, MESSAGE_KINDS } from './protocol.js';
 import { writeSave, newSaveId } from './persistence.js';
@@ -54,6 +54,14 @@ const CASTLE_RADIUS_FLOOR = 5;
 const ADDITIONAL_BIOME_MIN_SCALE = 0.5;
 const ADDITIONAL_BIOME_MAX_SCALE = 2.0;
 const ADDITIONAL_BIOME_PLACEMENT_ATTEMPTS = 60;
+
+// Road-carver cost constants. The inter-biome carver picks the lowest-cost
+// path through workable terrain by default; the water cost lets it route
+// along the coast at a small premium; the unworkable cost is a last-resort
+// chisel through bramble / mountain cliff (the user spec puts this at 1000).
+const ROAD_WATER_COST = 2;
+const ROAD_UNWORKABLE_COST = 1000;
+const DEFAULT_BIOME_BASE_TERRAIN_ID = 'plains';
 
 const DEFAULT_BIOME_SETTINGS = {
   minCastles: 2,
@@ -159,6 +167,19 @@ export class GameRoom {
 
     // PASS 3 — decorators (biome + base + remaining world spawners)
     this._passThreeDecorate(biomeContext);
+
+    // PASS 4 — intra-biome roads. Carve a road from each biome anchor to
+    // every POI inside the biome, reducing workable terrain to the biome's
+    // base terrain along the way. Cumulative — each path sees the terrain
+    // after the previous one was carved.
+    this._passFourIntraBiomeRoads(biomeContext);
+
+    // PASS 5 — inter-biome roads. Connect every castle to every other
+    // castle via a land/sea route. Workable terrain (and sea hops at a
+    // small premium) are preferred; bramble / mountain cliffs are crossed
+    // at ROAD_UNWORKABLE_COST per hex only as a last resort. Each pair's
+    // path is computed AFTER the previous carve so road trunks merge.
+    this._passFiveInterBiomeRoads(biomeContext);
 
     const stateEntityId = getWorldState(this.world);
     patchComponentTracked(this.world, stateEntityId, 'WorldState', ['playerOrder'],
@@ -478,6 +499,170 @@ export class GameRoom {
     }
 
     invalidateTileIndex(this.world);
+  }
+
+  // ── Pass 4 ──────────────────────────────────────────────────────────────
+  // Carve workable roads inside each biome from its anchor to every POI.
+  // The carver picks the least-cost workable-terrain path and reduces each
+  // tile along it to the biome's declared base terrain. Cumulative across
+  // POIs so paths inside the same biome share trunks.
+  _passFourIntraBiomeRoads(biomeContext) {
+    const { biomeHexesByAnchor } = biomeContext;
+    // hex → biome's base terrain id, for any hex that sits in a biome.
+    const biomeBaseByHex = this._buildBiomeBaseByHexMap(biomeContext);
+    biomeContext.biomeBaseByHex = biomeBaseByHex;
+
+    const intraBiomeCostFn = (terrain /*, q, r */) => {
+      // Roads inside a biome are workable-only — water and unworkable
+      // tiles are off-limits for the intra-biome carver.
+      return resolveWorkableCost(terrain);
+    };
+
+    forEachEntityWith(this.world, ['BiomeAnchor', 'Position'], (anchorEntityId, _anchor, anchorPos) => {
+      const biomeHexes = biomeHexesByAnchor.get(anchorEntityId) ?? [];
+      if (biomeHexes.length === 0) return;
+      const biomeHexKeys = new Set(biomeHexes.map(h => hexKey(h.q, h.r)));
+      const baseTerrainId = biomeBaseByHex.get(hexKey(anchorPos.q, anchorPos.r))
+        ?? DEFAULT_BIOME_BASE_TERRAIN_ID;
+      const poiHexes = this._collectPoiHexesIn(biomeHexKeys, anchorEntityId);
+      const center = { q: anchorPos.q, r: anchorPos.r };
+      for (const goal of poiHexes) {
+        const path = findPath(this.world, this.registry, center, goal, {
+          costFn: intraBiomeCostFn,
+        });
+        if (!path) continue;
+        this._carveRoadAlong(path.steps, biomeBaseByHex);
+        invalidateTileIndex(this.world);
+      }
+    });
+  }
+
+  // ── Pass 5 ──────────────────────────────────────────────────────────────
+  // Connect every castle to every other castle via a single connected
+  // network of roads. We connect each castle to its nearest already-placed
+  // castle (MST-style) which gives all-pairs reachability transitively.
+  // Cost function prefers workable land, then sea, then unworkable tiles
+  // at the major penalty.
+  _passFiveInterBiomeRoads(biomeContext) {
+    const biomeBaseByHex = biomeContext.biomeBaseByHex
+      ?? this._buildBiomeBaseByHexMap(biomeContext);
+
+    const castles = [];
+    forEachEntityWith(this.world, ['Castle', 'Position'], (entityId, _castle, position) => {
+      castles.push({ entityId, q: position.q, r: position.r });
+    });
+    if (castles.length < 2) return;
+
+    const interBiomeCostFn = (terrain /*, q, r */) => {
+      if (!terrain) return null;
+      const workable = resolveWorkableCost(terrain);
+      if (workable != null) return workable;
+      // Sea hop — small premium so we route along land when sane but the
+      // carver naturally hugs the coast and uses water bridges when
+      // they're shorter than walking the long way round.
+      if (terrain.components?.PassableByWater) return ROAD_WATER_COST;
+      // Bramble / mountain cliff / anything else with no workable + no
+      // water passage. Allowed only as a last resort, at major cost.
+      return ROAD_UNWORKABLE_COST;
+    };
+
+    // Connect each castle (in placement order) to its nearest predecessor.
+    // The first castle is the network seed.
+    const connected = [castles[0]];
+    for (let i = 1; i < castles.length; i++) {
+      const next = castles[i];
+      let nearest = connected[0];
+      let nearestDist = hexDistance(next, nearest);
+      for (let j = 1; j < connected.length; j++) {
+        const d = hexDistance(next, connected[j]);
+        if (d < nearestDist) { nearest = connected[j]; nearestDist = d; }
+      }
+      const path = findPath(this.world, this.registry, nearest, next, {
+        costFn: interBiomeCostFn,
+      });
+      if (path) {
+        this._carveRoadAlong(path.steps, biomeBaseByHex);
+        invalidateTileIndex(this.world);
+      } else {
+        this.log('pass5: no inter-biome path between castles ' + nearest.entityId + ' and ' + next.entityId);
+      }
+      connected.push(next);
+    }
+  }
+
+  // Build hex → base-terrain-id map for every hex inside any biome anchor.
+  // The carver consults this when reducing a tile back to "the local
+  // biome's base". Hexes outside any biome aren't in the map; callers
+  // default to DEFAULT_BIOME_BASE_TERRAIN_ID.
+  _buildBiomeBaseByHexMap(biomeContext) {
+    const out = new Map();
+    for (const [anchorEntityId, hexes] of biomeContext.biomeHexesByAnchor) {
+      const biomeAnchor = getComponent(this.world, anchorEntityId, 'BiomeAnchor');
+      const decorator = biomeAnchor
+        ? this.registry.biomeDecorators.get(biomeAnchor.decoratorId)
+        : null;
+      const baseTerrainId = decorator?.baseTerrainId ?? DEFAULT_BIOME_BASE_TERRAIN_ID;
+      for (const hex of hexes) out.set(hexKey(hex.q, hex.r), baseTerrainId);
+    }
+    return out;
+  }
+
+  // Collect goal hexes for intra-biome roads — POIs (MapObject entities)
+  // and BiomeAnchor entities that have a MapObject sitting on them. We
+  // exclude the anchor itself (it's the start point) and any POI whose
+  // tile is unworkable (a fish school on water has no road to it).
+  _collectPoiHexesIn(biomeHexKeys, anchorEntityId) {
+    const out = [];
+    const seen = new Set();
+    forEachEntityWith(this.world, ['MapObject', 'Position'], (entityId, _mo, position) => {
+      if (entityId === anchorEntityId) return;
+      const key = hexKey(position.q, position.r);
+      if (!biomeHexKeys.has(key)) return;
+      if (seen.has(key)) return;
+      const terrain = this._effectiveTerrainAt(position.q, position.r);
+      if (resolveWorkableCost(terrain) == null) return;
+      seen.add(key);
+      out.push({ q: position.q, r: position.r });
+    });
+    return out;
+  }
+
+  // Reduce every step on the path to the local biome's base terrain. Water
+  // tiles are left as-is (you sail across them). TerrainOverride entities
+  // sitting on a carved tile are destroyed — the road is now visible and
+  // passable where bramble or other override used to stand.
+  _carveRoadAlong(steps, biomeBaseByHex) {
+    if (!steps || steps.length === 0) return;
+    // Build a fast lookup of overrides keyed by hex so we can clear them
+    // without iterating the world per step.
+    const overrideEntitiesByKey = new Map();
+    forEachEntityWith(this.world, ['TerrainOverride', 'Position'], (entityId, _override, position) => {
+      overrideEntitiesByKey.set(hexKey(position.q, position.r), entityId);
+    });
+    // Tiles indexed by hex for direct mutation.
+    const tilesByKey = new Map();
+    forEachEntityWith(this.world, ['Tile'], (entityId, tile) => {
+      tilesByKey.set(hexKey(tile.q, tile.r), { entityId, tile });
+    });
+
+    for (const step of steps) {
+      const key = hexKey(step.q, step.r);
+      const tileEntry = tilesByKey.get(key);
+      if (!tileEntry) continue;
+      const baseTerrain = getTerrain(this.registry, tileEntry.tile.terrainId);
+      // Water tiles stay as water — the sail portion of the road needs them.
+      if (baseTerrain?.components?.PassableByWater) continue;
+      const baseTerrainId = biomeBaseByHex.get(key) ?? DEFAULT_BIOME_BASE_TERRAIN_ID;
+      // If the carve clears anything (override or non-base terrain), do it.
+      const overrideEntityId = overrideEntitiesByKey.get(key);
+      if (overrideEntityId != null) {
+        destroyEntity(this.world, overrideEntityId);
+        overrideEntitiesByKey.delete(key);
+      }
+      if (tileEntry.tile.terrainId !== baseTerrainId) {
+        tileEntry.tile.terrainId = baseTerrainId;
+      }
+    }
   }
 
   loadFromSave(savedSnapshot) {

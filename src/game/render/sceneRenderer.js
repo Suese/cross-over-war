@@ -14,6 +14,9 @@ import {
   WebGLRenderer,
   AmbientLight,
   DirectionalLight,
+  BoxGeometry,
+  Mesh,
+  MeshStandardMaterial,
   Group,
   Vector3,
   Color,
@@ -32,6 +35,49 @@ const CAMERA_DOWN_ANGLE_DEGREES = 80;
 const DEFAULT_CAMERA_DISTANCE = 38;
 const MIN_CAMERA_DISTANCE = 8;
 const MAX_CAMERA_DISTANCE = 300;
+
+// Placeholder geometry / material shared by every "waiting for the asset to
+// arrive" mesh — heroes, map objects with an `AssetReference`, etc. Built
+// once at module load so we don't pay the geometry-allocation cost per
+// entity that's mid-stream.
+const PLACEHOLDER_GEOMETRY = new BoxGeometry(0.6, 0.8, 0.6);
+const PLACEHOLDER_MATERIAL = new MeshStandardMaterial({
+  color: 0x9a9aa2, roughness: 0.9, metalness: 0.0,
+});
+
+// Build a streamed mesh: a grey placeholder cube returned synchronously,
+// with a background asset request that swaps the cube for the GLB scene
+// (cloned per-entity so multiple instances can share a single source asset)
+// when the bytes arrive. The mesh stashes `userData.assetRelease` so the
+// renderer can drop the asset refcount when the mesh leaves the scene.
+function buildStreamedMesh(assets, modelKey, requestedBy) {
+  const group = new Group();
+  const placeholder = new Mesh(PLACEHOLDER_GEOMETRY, PLACEHOLDER_MATERIAL);
+  placeholder.position.y = 0.4;
+  placeholder.castShadow = true;
+  placeholder.receiveShadow = false;
+  group.add(placeholder);
+  let acquired = false;
+  assets.requestModel(modelKey, (scene) => {
+    if (!scene) return;
+    assets.acquireModel(modelKey);
+    acquired = true;
+    group.remove(placeholder);
+    const instance = scene.clone(true);
+    instance.traverse((child) => {
+      if (child.isMesh) { child.castShadow = true; child.receiveShadow = false; }
+    });
+    instance.position.set(0, 0, 0);
+    group.add(instance);
+  }, { requestedBy: requestedBy ?? 'streamed-mesh' });
+  group.userData.assetRelease = () => {
+    if (acquired) {
+      assets.releaseModel(modelKey);
+      acquired = false;
+    }
+  };
+  return group;
+}
 
 export function createSceneRenderer(canvas) {
   const renderer = new WebGLRenderer({ canvas, antialias: true, alpha: false });
@@ -94,20 +140,32 @@ export function createSceneRenderer(canvas) {
     // before this frame's `seen` pass repopulates `objectMeshesByEntityId`.
     for (const [entityId, entry] of meshGraveyard) {
       if (nowMs >= entry.removeAt) {
-        objectGroup.remove(entry.mesh);
+        releaseAndRemoveMesh(entry.mesh);
         meshGraveyard.delete(entityId);
       }
     }
 
     const seen = new Set();
     const fog = fogOverride ?? viewerFog(world, viewerPlayerId);
+    const fogVisibleSet = fog?.visibleKeys ?? fog?.visible;
+    const fogExploredSet = fog?.exploredKeys ?? fog?.explored;
 
     forEachEntityWith(world, ['Hero', 'Position'], (entityId, hero, position) => {
       seen.add(entityId);
       const ownership = getComponent(world, entityId, 'Ownership');
       const ownerPlayerId = ownership ? ownership.playerId : null;
+      const heroKey = position.q + ',' + position.r;
+      // Discovery gate: the hero's own player always sees their heroes; for
+      // anyone else, mesh construction (and any asset load) waits until the
+      // viewer's fog reveals their position. Once discovered the mesh sticks
+      // around even if fog re-shrouds them — invariant with current map.
+      const discovered = !fog
+        || ownerPlayerId === viewerPlayerId
+        || fogVisibleSet?.has(heroKey)
+        || fogExploredSet?.has(heroKey);
       let mesh = objectMeshesByEntityId.get(entityId);
       if (!mesh) {
+        if (!discovered) return;
         mesh = buildHeroMesh(registry, assets, hero, ownerPlayerId);
         objectGroup.add(mesh);
         objectMeshesByEntityId.set(entityId, mesh);
@@ -128,19 +186,20 @@ export function createSceneRenderer(canvas) {
         mesh.quaternion.identity();
       }
 
-      const heroKey = displayQ + ',' + displayR;
-      const fogVisible = fog?.visibleKeys ?? fog?.visible;
-      const heroVisible = !fog || fogVisible?.has(heroKey) || ownerPlayerId === viewerPlayerId;
+      const displayKey = displayQ + ',' + displayR;
+      const heroVisible = !fog || fogVisibleSet?.has(displayKey) || ownerPlayerId === viewerPlayerId;
       mesh.visible = heroVisible;
     });
 
     forEachEntityWith(world, ['MapObject', 'Position'], (entityId, mapObject, position) => {
       seen.add(entityId);
+      const objectKey = position.q + ',' + position.r;
+      const discovered = !fog || fogVisibleSet?.has(objectKey) || fogExploredSet?.has(objectKey);
       let mesh = objectMeshesByEntityId.get(entityId);
       if (!mesh) {
-        const type = registry.mapObjectTypes.get(mapObject.typeId);
-        if (!type?.buildMesh) return;
-        mesh = type.buildMesh(registry, assets, mapObject);
+        if (!discovered) return;
+        mesh = buildMapObjectMesh(world, registry, assets, mapObject, entityId);
+        if (!mesh) return;
         objectGroup.add(mesh);
         objectMeshesByEntityId.set(entityId, mesh);
       }
@@ -148,10 +207,7 @@ export function createSceneRenderer(canvas) {
       mesh.position.set(point.x, 0, point.z);
       // Map objects don't move, so revealing them once is enough — show them
       // both when visible and explored, but keep them hidden under shroud.
-      const objectKey = position.q + ',' + position.r;
-      const fogVisible = fog?.visibleKeys ?? fog?.visible;
-      const fogExplored = fog?.exploredKeys ?? fog?.explored;
-      mesh.visible = !fog || fogVisible?.has(objectKey) || fogExplored?.has(objectKey);
+      mesh.visible = !fog || fogVisibleSet?.has(objectKey) || fogExploredSet?.has(objectKey);
       // Conquest flag — generic convention: if the mesh has children named
       // 'conquest-flag' and/or 'conquest-flag-pole', the renderer tints them
       // to the owner's colour and toggles visibility based on the entity's
@@ -169,10 +225,35 @@ export function createSceneRenderer(canvas) {
       if (graceMs > 0) {
         meshGraveyard.set(entityId, { mesh, removeAt: nowMs + graceMs });
       } else {
-        objectGroup.remove(mesh);
+        releaseAndRemoveMesh(mesh);
       }
       objectMeshesByEntityId.delete(entityId);
     }
+  }
+
+  // Remove a mesh from the scene and let any streaming subscriber release
+  // its asset refcount. Meshes built via `buildHeroMesh` /
+  // `buildMapObjectMesh` stash a `userData.assetRelease` callback so the LRU
+  // cache learns they're no longer pinning a model.
+  function releaseAndRemoveMesh(mesh) {
+    objectGroup.remove(mesh);
+    mesh.userData?.assetRelease?.();
+  }
+
+  // Resolve the mesh for a map-object entity. Preference order:
+  //   1. The entity carries an `AssetReference { modelKey }` component →
+  //      build a placeholder grey cube and stream the GLB; once the asset
+  //      loads, swap the placeholder for the GLB scene.
+  //   2. The registered map-object type provides a procedural `buildMesh`
+  //      function → call it (existing pattern for hand-built meshes like
+  //      castles and mushroom huts).
+  //   3. Nothing renderable — return null so the renderer skips the entity.
+  function buildMapObjectMesh(world, registry, assets, mapObject, entityId) {
+    const assetRef = getComponent(world, entityId, 'AssetReference');
+    if (assetRef?.modelKey) return buildStreamedMesh(assets, assetRef.modelKey, 'mapObject:' + (mapObject.typeId ?? entityId));
+    const type = registry.mapObjectTypes.get(mapObject.typeId);
+    if (type?.buildMesh) return type.buildMesh(registry, assets, mapObject);
+    return null;
   }
 
   // The grace window is exactly the time remaining on the longest active

@@ -1,9 +1,8 @@
-// Hero mesh. If a hero archetype declares a model asset and that GLB is
-// present, we drop it in. Otherwise we draw a coloured cube as the user
-// requested — explicitly so missing models read as "unfinished art" rather
-// than disguising the gap.
-//
-// For the demo we go with the cube fallback so everything is offline-clean.
+// Hero mesh — coloured cube placeholder with a streaming swap-in for the
+// hero's `modelKey` GLB if one exists. The cube renders immediately so the
+// game is interactive while the model bytes are still in flight; once the
+// asset loader resolves, the body and head boxes are replaced with the GLB
+// scene (cloned so multiple heroes can share a single source asset).
 
 import {
   BoxGeometry,
@@ -41,8 +40,8 @@ export function buildHeroMesh(registry, assets, hero, ownerPlayerId) {
   head.castShadow = true;
   group.add(head);
 
-  // Bright "nose" wedge sticking out of the front for an unambiguous facing
-  // indicator — tiny but visible at typical zoom.
+  // Bright "nose" wedge — kept even after the model loads so the facing
+  // indicator survives the swap.
   const noseMaterial = new MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.4,
@@ -54,24 +53,39 @@ export function buildHeroMesh(registry, assets, hero, ownerPlayerId) {
   nose.castShadow = true;
   group.add(nose);
 
-  // Hero names live in the right-click info panel rather than as a floating
-  // sprite above the mesh — the map reads cleaner without persistent labels.
+  // Stream the model if the archetype declared one. Asset loader returns
+  // null synchronously when the file is missing, so heroes without a GLB
+  // simply stay as the coloured cube.
+  if (hero?.modelKey) {
+    let acquired = false;
+    assets.requestModel(hero.modelKey, (scene) => {
+      if (!scene) return;
+      // Pin the asset against LRU eviction while this mesh references it.
+      assets.acquireModel(hero.modelKey);
+      acquired = true;
+      group.remove(body);
+      group.remove(head);
+      body.geometry.dispose();
+      body.material.dispose();
+      head.geometry.dispose();
+      head.material.dispose();
+      const instance = scene.clone(true);
+      instance.traverse((child) => {
+        if (child.isMesh) { child.castShadow = true; child.receiveShadow = false; }
+      });
+      instance.position.set(0, 0, 0);
+      group.add(instance);
+    }, { requestedBy: 'hero:' + (hero.archetypeId ?? hero.name) });
 
-  // If the registry references a model and the asset exists, swap in the
-  // model. Done after the cube is in place so something is always visible.
-  if (hero?.modelKey && assets.hasAsset(hero.modelKey)) {
-    assets.loadModel(hero.modelKey, { requestedBy: 'hero:' + (hero.archetypeId ?? hero.name) })
-      .then(modelRoot => {
-        if (!modelRoot) return;
-        group.remove(body);
-        group.remove(head);
-        modelRoot.traverse(child => {
-          if (child.isMesh) { child.castShadow = true; child.receiveShadow = false; }
-        });
-        modelRoot.position.set(0, 0, 0);
-        group.add(modelRoot);
-      })
-      .catch(error => console.warn('hero model load failed:', error));
+    // When the renderer removes this group from the scene, the caller is
+    // expected to invoke `disposeMesh(group)` (see sceneRenderer) which uses
+    // the metadata below to release the refcount.
+    group.userData.assetRelease = () => {
+      if (acquired) {
+        assets.releaseModel(hero.modelKey);
+        acquired = false;
+      }
+    };
   }
 
   return group;

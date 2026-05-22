@@ -35,6 +35,11 @@ export default {
     // grass/plains and shallow/deep mix. Biome decorators refine further
     // (forest, forest hills, mountain) on the hexes they're assigned.
 
+    // Each terrain points at a .glb tile model under this module's assets/
+    // folder. The renderer instances one InstancedMesh per submesh inside
+    // each model; if a .glb is missing, the tile falls back to a coloured
+    // cylinder using `fallbackColor` (and optional `textureKey`).
+
     registerTerrain(registry, {
       id: 'plains',
       name: 'Plains',
@@ -42,26 +47,39 @@ export default {
       components: {
         PassableByLand: { cost: 5 },
         PassableByAir: { cost: 1 },
+        // Road carver baseline — costs nothing to "work" because there's
+        // nothing to clear. Plains are the default base terrain that other
+        // workable tiles get reduced to when a road is carved through.
+        WorkableTerrain: { cost: 1 },
       },
       fallbackColor: 0x8fcc6a,
       textureKey: 'base/grass.png',
+      modelKey: 'base/plains.glb',
     });
     declareAssetReference(registry, {
-      moduleName: MODULE_NAME,
-      kind: 'texture',
-      assetKey: 'base/grass.png',
-      declaredFor: 'terrain:plains',
+      moduleName: MODULE_NAME, kind: 'texture',
+      assetKey: 'base/grass.png', declaredFor: 'terrain:plains',
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/plains.glb', declaredFor: 'terrain:plains',
     });
 
     registerTerrain(registry, {
-      id: 'grass',
-      name: 'Grass',
-      description: 'Knee-high grass and the odd shrub. Slower than open plain.',
+      id: 'grassy-hills',
+      name: 'Grassy Hills',
+      description: 'Rolling slopes of knee-high grass. Slower than open plain.',
       components: {
         PassableByLand: { cost: 7 },
         PassableByAir: { cost: 1 },
+        WorkableTerrain: { cost: 2 },
       },
       fallbackColor: 0x6ea84a,
+      modelKey: 'base/grassy-hills.glb',
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/grassy-hills.glb', declaredFor: 'terrain:grassy-hills',
     });
 
     registerTerrain(registry, {
@@ -71,8 +89,15 @@ export default {
       components: {
         PassableByLand: { cost: 20 },
         PassableByAir: { cost: 1 },
+        // Trees can be felled — workable, but more expensive than open ground.
+        WorkableTerrain: { cost: 5 },
       },
       fallbackColor: 0x355e36,
+      modelKey: 'base/forest.glb',
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/forest.glb', declaredFor: 'terrain:forest',
     });
 
     registerTerrain(registry, {
@@ -82,8 +107,15 @@ export default {
       components: {
         PassableByLand: { cost: 40 },
         PassableByAir: { cost: 1 },
+        // Wooded slopes — most expensive workable terrain.
+        WorkableTerrain: { cost: 12 },
       },
       fallbackColor: 0x44653c,
+      modelKey: 'base/forest-hills.glb',
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/forest-hills.glb', declaredFor: 'terrain:forest-hills',
     });
 
     registerTerrain(registry, {
@@ -93,15 +125,19 @@ export default {
       components: {
         PassableByLand: { cost: 20 },
         PassableByAir: { cost: 1 },
+        WorkableTerrain: { cost: 8 },
       },
       fallbackColor: 0xa68a5e,
       textureKey: 'base/mountain.png',
+      modelKey: 'base/dusty-hills.glb',
     });
     declareAssetReference(registry, {
-      moduleName: MODULE_NAME,
-      kind: 'texture',
-      assetKey: 'base/mountain.png',
-      declaredFor: 'terrain:dusty-hills',
+      moduleName: MODULE_NAME, kind: 'texture',
+      assetKey: 'base/mountain.png', declaredFor: 'terrain:dusty-hills',
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/dusty-hills.glb', declaredFor: 'terrain:dusty-hills',
     });
 
     registerTerrain(registry, {
@@ -113,6 +149,11 @@ export default {
         PassableByAir: { cost: 1 },
       },
       fallbackColor: 0x6e5d48,
+      modelKey: 'base/mountains.glb',
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/mountains.glb', declaredFor: 'terrain:mountain',
     });
 
     registerTerrain(registry, {
@@ -125,12 +166,15 @@ export default {
       },
       fallbackColor: 0x2c6691,
       textureKey: 'base/water.png',
+      modelKey: 'base/deep-ocean.glb',
     });
     declareAssetReference(registry, {
-      moduleName: MODULE_NAME,
-      kind: 'texture',
-      assetKey: 'base/water.png',
-      declaredFor: 'terrain:deep-ocean',
+      moduleName: MODULE_NAME, kind: 'texture',
+      assetKey: 'base/water.png', declaredFor: 'terrain:deep-ocean',
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/deep-ocean.glb', declaredFor: 'terrain:deep-ocean',
     });
 
     registerTerrain(registry, {
@@ -142,6 +186,11 @@ export default {
         PassableByAir: { cost: 1 },
       },
       fallbackColor: 0x6cb4d4,
+      modelKey: 'base/shallow-ocean.glb',
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/shallow-ocean.glb', declaredFor: 'terrain:shallow-ocean',
     });
 
     registerTerrain(registry, {
@@ -152,6 +201,11 @@ export default {
         PassableByAir: { cost: 1 },
       },
       fallbackColor: 0x3a4d24,
+      modelKey: 'base/bramble.glb',
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/bramble.glb', declaredFor: 'terrain:bramble',
     });
 
     // ── Tile prefab ─────────────────────────────────────────────────────
@@ -213,7 +267,7 @@ export default {
 
     // ── Base decorator ──────────────────────────────────────────────────
     // Runs once over every tile that isn't inside any biome. Modulates the
-    // coarse mapgen output with perlin noise: plains → plains | grass,
+    // coarse mapgen output with perlin noise: plains → plains | grassy-hills,
     // deep-ocean → deep-ocean | shallow-ocean. Dusty hills are left alone
     // here — they only appear in biomes once the biome decorator has had a
     // chance to refine them.
@@ -224,7 +278,7 @@ export default {
         if (!tile) continue;
         const sample = fractalNoise2D(noise, hex.q * 0.18, hex.r * 0.18, 3, 0.55, 2.0);
         if (tile.terrainId === 'plains') {
-          tile.terrainId = sample > 0.15 ? 'grass' : 'plains';
+          tile.terrainId = sample > 0.15 ? 'grassy-hills' : 'plains';
         } else if (tile.terrainId === 'deep-ocean') {
           tile.terrainId = sample > 0.1 ? 'shallow-ocean' : 'deep-ocean';
         }

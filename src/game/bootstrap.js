@@ -89,6 +89,12 @@ export function startGameSession({
     loadAllModules({ world: clientWorld, registry: clientRegistry, assets });
   }
 
+  // Assets stream in on demand — `terrainManager.buildFromWorld` lays down
+  // placeholder cylinders for each terrain, requests the matching .glb, and
+  // swaps the placeholders for real models as they arrive. Heroes and map
+  // objects load their assets the moment the local viewer first discovers
+  // them. No preload pass is needed.
+
   const renderer = createSceneRenderer(canvas);
   const terrainManager = createTerrainInstanceManager({
     scene: renderer.scene,
@@ -100,7 +106,6 @@ export function startGameSession({
 
   if (mode === 'host') terrainManager.buildFromWorld(viewerWorld());
 
-  // ── HUD ─────────────────────────────────────────────────────────────────
   let selectedHeroEntityId = null;
   const hud = installHudOverlay(hudRoot, {
     onEndTurnClicked: () => attemptEndTurn(),
@@ -116,7 +121,6 @@ export function startGameSession({
   const cursorHud = installCursorHud(document.body);
   const infoOverlay = installInfoOverlay(document.body);
 
-  // ── Input ───────────────────────────────────────────────────────────────
   installPointerInput(renderer, {
     onHoverHex: (hex, event) => {
       const heroId = ensureSelectedHero();
