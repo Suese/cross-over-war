@@ -14,7 +14,7 @@ import {
   createWorld, getComponent, hasComponent, forEachEntityWith,
   applyChangeOps, addComponent, setChangeRecording,
 } from './ecs/world.js';
-import { playerColorCss } from './render/playerColors.js';
+import { playerColorCss, defaultFlagConfigFor } from './render/playerColors.js';
 import { createRegistry, getTerrain } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
 import { createAssetLoader } from './modules/assetLoader.js';
@@ -77,10 +77,12 @@ export function startGameSession({
       //      remapping Ownership / fog / playerOrder along the way.
       gameRoom.loadFromSave(loadFromSnapshot);
       for (const player of lastKnownPlayers) {
-        gameRoom.addPlayer(player.playerId ?? player.id, player.name);
+        gameRoom.addPlayer(player.playerId ?? player.id, player.name, player.profile ?? null);
       }
     } else {
-      for (const player of lastKnownPlayers) gameRoom.addPlayer(player.playerId ?? player.id, player.name);
+      for (const player of lastKnownPlayers) {
+        gameRoom.addPlayer(player.playerId ?? player.id, player.name, player.profile ?? null);
+      }
       gameRoom.startNewGame();
     }
   } else {
@@ -221,6 +223,23 @@ export function startGameSession({
     onInfoRelease: () => infoOverlay.hide(),
   });
 
+  // Push the current player list's flag configs into the renderer. Each
+  // player carries an optional `.profile.flag` (set by the lobby flag
+  // editor / loaded from localStorage); when missing we fall back to a
+  // deterministic palette-derived default keyed off the player's id. The
+  // renderer compares object identity to detect changes, so we always feed
+  // it freshly-built objects rather than mutating in place.
+  function syncFlagConfigs() {
+    renderer.clearFlagConfigs();
+    for (const player of lastKnownPlayers ?? []) {
+      const playerId = player.playerId ?? player.id;
+      if (!playerId) continue;
+      const flag = player.profile?.flag ?? defaultFlagConfigFor(playerId);
+      renderer.setFlagConfigForPlayer(playerId, flag);
+    }
+  }
+  syncFlagConfigs();
+
   // ── Render passes ───────────────────────────────────────────────────────
   // rerender() runs on every state change (snapshot / delta). It rebuilds
   // the path overlay + HUD and seeds the renderer with the latest fog. The
@@ -338,6 +357,7 @@ export function startGameSession({
     pendingResync = false;
     haveInitSnapshot = true;
     lastKnownPlayers = snapshot.players ?? lastKnownPlayers;
+    syncFlagConfigs();
     if (selectedHeroEntityId != null && !clientWorld.entities.has(selectedHeroEntityId)) {
       selectedHeroEntityId = null;
     }
@@ -379,6 +399,7 @@ export function startGameSession({
   function ingestPlayersChanged(message) {
     if (mode === 'host') return;
     lastKnownPlayers = message.players ?? lastKnownPlayers;
+    syncFlagConfigs();
     rerender();
   }
 
@@ -412,6 +433,8 @@ export function startGameSession({
         queueAnimationsFromEvents(message.events ?? []);
         rerender();
       } else if (message?.type === MESSAGE_KINDS.PLAYERS_CHANGED) {
+        lastKnownPlayers = message.players ?? lastKnownPlayers;
+        syncFlagConfigs();
         rerender();
       }
       originalBroadcast?.(message);
@@ -756,14 +779,18 @@ export function startGameSession({
     gameRoom.handleAction(fromPlayerId, action);
   }
 
-  function announceClientConnected(peerId, name) {
+  function announceClientConnected(peerId, name, profile = null) {
     if (mode !== 'host' || !gameRoom) return;
-    gameRoom.addPlayer(peerId, name);
+    gameRoom.addPlayer(peerId, name, profile);
     gameRoom.sendInitSnapshotTo(peerId);
   }
   function announceClientDisconnected(peerId) {
     if (mode !== 'host' || !gameRoom) return;
     gameRoom.markPlayerDisconnected(peerId);
+  }
+  function updatePlayerProfile(peerId, profile) {
+    if (mode !== 'host' || !gameRoom) return;
+    gameRoom.updatePlayerProfile(peerId, profile);
   }
 
   return {
@@ -771,6 +798,7 @@ export function startGameSession({
     handleClientAction,
     announceClientConnected,
     announceClientDisconnected,
+    updatePlayerProfile,
     rerender,
     getMissingAssetsMarkdown: () =>
       formatMissingAssetsMarkdown(assets.getMissingAssets(), declarationListFor(viewerRegistry(), assets)),

@@ -33,11 +33,14 @@ export {
   registerActionType,
   registerBiomeDecorator,
   registerWorldSpawner,
+  registerEmblem,
   setBaseDecorator,
   declareAssetReference,
   spawnFromPrefab,
   getTerrain,
   getActionType,
+  getEmblem,
+  listEmblems,
 } from './ecs/registry.js';
 
 // ── Hex math ──────────────────────────────────────────────────────────────
@@ -61,6 +64,7 @@ export {
   invalidateTileIndex,
   splitPathByMovementBudget,
   estimateTurnsForPath,
+  getEffectiveTerrainAt,
 } from './map/pathfinding.js';
 
 // ── Compositional traversability + workability ───────────────────────────

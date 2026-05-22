@@ -125,7 +125,7 @@ export class GameRoom {
   // ── Lobby plumbing ─────────────────────────────────────────────────────
   // Add a player. If a saved-but-disconnected slot has the same name, we
   // restore it instead of appending. Returns the slot's playerId.
-  addPlayer(connectingPlayerId, name) {
+  addPlayer(connectingPlayerId, name, profile = null) {
     const reusableSlot = this.players.find(p => !p.connected && p.name === name);
     if (reusableSlot) {
       // Map the saved hero(s) from the old id to the new id.
@@ -135,13 +135,28 @@ export class GameRoom {
       reusableSlot.originalPlayerId = reusableSlot.playerId;
       reusableSlot.playerId = connectingPlayerId;
       reusableSlot.connected = true;
+      if (profile) reusableSlot.profile = profile;
       this._publishPlayersChanged();
       return connectingPlayerId;
     }
-    if (this.players.some(p => p.playerId === connectingPlayerId)) return connectingPlayerId;
-    this.players.push({ playerId: connectingPlayerId, name, connected: true, originalPlayerId: null });
+    const existing = this.players.find(p => p.playerId === connectingPlayerId);
+    if (existing) {
+      if (profile) existing.profile = profile;
+      return connectingPlayerId;
+    }
+    this.players.push({ playerId: connectingPlayerId, name, profile, connected: true, originalPlayerId: null });
     this._publishPlayersChanged();
     return connectingPlayerId;
+  }
+
+  // Late update — a peer changed their flag/name in the lobby after joining.
+  // The roster object is shared with the persistence layer + the wire so we
+  // re-publish whenever a player edits in place.
+  updatePlayerProfile(playerId, profile) {
+    const slot = this.players.find(p => p.playerId === playerId);
+    if (!slot) return;
+    slot.profile = profile ?? slot.profile;
+    this._publishPlayersChanged();
   }
 
   markPlayerDisconnected(playerId) {
@@ -788,12 +803,17 @@ export class GameRoom {
     const heroEntityId = this._heroForPlayer(playerId, action.heroEntityId);
     if (!heroEntityId) return;
     const position = getComponent(this.world, heroEntityId, 'Position');
+    const movement = getComponent(this.world, heroEntityId, 'Movement');
     const goal = { q: action.goalQ, r: action.goalR };
     const exploredKeys = this._playerExploredSet(playerId);
     const blockedKeys = collectBlockedKeysExcluding(this.world, heroEntityId);
     const traversalModes = collectTraversalModes(this.world, heroEntityId);
+    // movementMax acts as the per-turn ceiling on a single tile's entry cost.
+    // MP doesn't accumulate across turns, so any tile costing more than the
+    // cap is unreachable for this hero — refuse to plan into it.
     const path = findPath(this.world, this.registry, position, goal, {
       exploredKeys, blockedKeys, traversalModes,
+      maxStepCost: movement?.movementMax ?? Infinity,
     });
     if (path) {
       patchComponentTracked(this.world, heroEntityId, 'Movement', ['plannedPath'], { steps: path.steps });

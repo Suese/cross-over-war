@@ -78,8 +78,11 @@ export function createHeroAnimations(hexSize) {
     return {
       x, z, yaw,
       currentTileIndex: stepIndex,
+      fromQ: fromHex.q,
+      fromR: fromHex.r,
       currentQ: toHex.q,
       currentR: toHex.r,
+      stepFraction,
       progress: elapsedMs / animation.totalDurationMs,
     };
   }

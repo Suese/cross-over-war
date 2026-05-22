@@ -16,6 +16,7 @@ export function createRegistry() {
     baseDecorator: null,        // optional decorator that runs once over every tile not claimed by a biome
     worldSpawners: [],      // [(context) => void] — invoked once after biomes + base decorator
     assetReferences: [],    // [{ moduleName, kind, id, path }] — for audit
+    emblems: new Map(),     // id → { id, name, draw(ctx, size, colourHex) } — flag emblems
   };
 }
 
@@ -127,4 +128,29 @@ export function setBaseDecorator(registry, decorate) {
 // The asset loader and audit step both read from this list.
 export function declareAssetReference(registry, reference) {
   registry.assetReferences.push(reference);
+}
+
+// Register a flag emblem — a player-selectable insignia that gets painted
+// onto the centre of their flag's cloth. Definition shape:
+//   id    : string                          — unique, namespace by module
+//   name  : string                          — shown in the lobby flag editor
+//   draw  : (ctx, size, colourHex) => void  — paint into the supplied 2D
+//     canvas context. `size` is the side length in pixels (square canvas).
+//     The canvas has already been cleared; the function should draw fully
+//     opaque pixels in `colourHex` (anti-aliased edges are fine).
+export function registerEmblem(registry, definition) {
+  if (!definition.id) throw new Error('registerEmblem: id required');
+  if (typeof definition.draw !== 'function') throw new Error('registerEmblem: draw(fn) required');
+  if (registry.emblems.has(definition.id)) {
+    throw new Error('emblem id already registered: ' + definition.id);
+  }
+  registry.emblems.set(definition.id, definition);
+}
+
+export function getEmblem(registry, emblemId) {
+  return registry.emblems.get(emblemId) ?? null;
+}
+
+export function listEmblems(registry) {
+  return Array.from(registry.emblems.values());
 }

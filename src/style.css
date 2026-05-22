@@ -130,11 +130,104 @@ button.primary {
 }
 button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 button.small { padding: 5px 10px; font-size: 12px; }
+button.danger { color: var(--danger); border-color: rgba(255, 88, 114, 0.4); }
+button.danger:hover:not(:disabled) { background: rgba(255, 88, 114, 0.12); }
 
 .row {
   display: flex;
   gap: 10px;
   margin-top: 14px;
+}
+.row > .grow { flex: 1 1 auto; }
+
+/* ── Profile + flag editor ────────────────────────────────────────────── */
+.profile-editor {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(11, 15, 23, 0.4);
+}
+.profile-editor > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  user-select: none;
+}
+.profile-editor > summary::-webkit-details-marker { display: none; }
+.profile-editor > summary .summary-label {
+  flex: 1 1 auto;
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 14px;
+}
+.profile-editor > summary canvas {
+  border-radius: 4px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  width: 64px;
+  height: 48px;
+  flex: 0 0 64px;
+}
+.profile-editor[open] > summary { border-bottom: 1px solid var(--border); }
+.profile-editor-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.profile-editor-body .row { margin-top: 0; }
+.profile-editor-body select,
+.profile-editor-body input[type="color"] {
+  width: 100%;
+}
+.profile-editor-body input[type="color"] {
+  height: 32px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+  cursor: pointer;
+}
+.flag-preview-row {
+  display: flex;
+  gap: 14px;
+  align-items: stretch;
+}
+.flag-preview-row #flag-preview-canvas {
+  flex: 0 0 160px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 160px;
+  height: 120px;
+}
+.flag-preview-row .flag-controls {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.flag-preview-row .flag-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.colour-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 10px;
+}
+.colour-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-dim);
 }
 
 /* Host controls in the waiting room — vertically stacked settings + start. */

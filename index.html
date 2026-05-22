@@ -20,6 +20,65 @@
           <input id="name-input" type="text" maxlength="16" placeholder="Commander" />
         </label>
 
+        <!-- Profile + flag editor. Lets the player pick a flag (three
+             colours, stripe direction, emblem + emblem colour) and save it
+             under a named profile in localStorage so future sessions
+             remember it. -->
+        <details id="profile-editor" class="profile-editor" open>
+          <summary>
+            <span class="summary-label">Profile &amp; flag</span>
+            <canvas id="profile-summary-preview" width="64" height="48"></canvas>
+          </summary>
+          <div class="profile-editor-body">
+            <div class="row">
+              <label class="grow">
+                Saved profiles
+                <select id="profile-select"></select>
+              </label>
+              <button id="profile-save" class="small" title="Save / overwrite the selected profile">Save</button>
+              <button id="profile-save-as" class="small" title="Save under a new name">Save as…</button>
+              <button id="profile-delete" class="small danger" title="Delete the selected profile">Delete</button>
+            </div>
+
+            <div class="flag-preview-row">
+              <canvas id="flag-preview-canvas" width="160" height="120"></canvas>
+              <div class="flag-controls">
+                <label>
+                  Stripe direction
+                  <select id="flag-stripe">
+                    <option value="horizontal">Horizontal</option>
+                    <option value="vertical">Vertical</option>
+                    <option value="diagonal">Diagonal</option>
+                  </select>
+                </label>
+                <label>
+                  Emblem
+                  <select id="flag-emblem"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="colour-grid">
+              <label>
+                Colour 1
+                <input id="flag-colour-1" type="color" value="#c81428" />
+              </label>
+              <label>
+                Colour 2
+                <input id="flag-colour-2" type="color" value="#ffffff" />
+              </label>
+              <label>
+                Colour 3
+                <input id="flag-colour-3" type="color" value="#1a4a8a" />
+              </label>
+              <label>
+                Emblem colour
+                <input id="flag-emblem-colour" type="color" value="#d4a834" />
+              </label>
+            </div>
+          </div>
+        </details>
+
         <div id="lobby-host">
           <div class="row">
             <button id="host-btn" class="primary">Host new game</button>

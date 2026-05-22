@@ -52,6 +52,17 @@ export function invalidateTileIndex(world) {
   world._tileIndexRegistryRef = null;
 }
 
+// Look up the effective terrain at a hex — base Tile.terrainId, or whatever
+// the TerrainOverride at this position promotes it to. Returns null if no
+// tile entity exists for (q, r). Builds on the same cached index used by
+// pathfinding so per-frame callers (the renderer) are O(1).
+export function getEffectiveTerrainAt(world, registry, q, r) {
+  const index = getOrBuildTileIndex(world, registry);
+  const entry = index.get(hexKey(q, r));
+  if (!entry) return null;
+  return entry.effectiveTerrain ?? entry.terrain;
+}
+
 // Minimal priority queue (binary heap) keyed by numeric priority.
 class PriorityQueue {
   constructor() { this.heap = []; }
@@ -107,14 +118,24 @@ class PriorityQueue {
 //   the step cost or null for impassable. Used by the road carver to pick
 //   different costs for workable land vs water vs unworkable terrain. When
 //   omitted, the default cost is `resolveTerrainCost(terrain, traversalModes)`.
+// options.maxStepCost: number — any tile whose individual entry cost is
+//   greater than this is treated as impassable. Used for hero pathing: MP
+//   resets every turn (no banking), so a tile costing more than the hero's
+//   per-turn cap can never be entered. Omit / `Infinity` for "no limit"
+//   (the road carver doesn't care).
 export function findPath(world, registry, start, goal, options = {}) {
   if (!start || !goal) return null;
   if (start.q === goal.q && start.r === goal.r) return { steps: [], costs: [] };
 
   const traversalModes = options.traversalModes ?? ['Land'];
   const customCostFn = typeof options.costFn === 'function' ? options.costFn : null;
-  const stepCostFor = (terrain, q, r) =>
-    customCostFn ? customCostFn(terrain, q, r) : resolveTerrainCost(terrain, traversalModes);
+  const maxStepCost = options.maxStepCost ?? Infinity;
+  const stepCostFor = (terrain, q, r) => {
+    const cost = customCostFn ? customCostFn(terrain, q, r) : resolveTerrainCost(terrain, traversalModes);
+    if (cost == null) return null;
+    if (cost > maxStepCost) return null;
+    return cost;
+  };
   const blocked = options.blockedKeys;
   const tileIndex = getOrBuildTileIndex(world, registry);
   const goalKey = hexKey(goal.q, goal.r);

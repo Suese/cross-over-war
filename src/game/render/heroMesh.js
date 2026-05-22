@@ -53,6 +53,15 @@ export function buildHeroMesh(registry, assets, hero, ownerPlayerId) {
   nose.castShadow = true;
   group.add(nose);
 
+  // Flag attachment point. The renderer mounts the player's customised flag
+  // mesh as a child of this group whenever the hero has both `BearsFlag` and
+  // `Ownership`. Keep it just above the head so a tall flag reads as the
+  // hero's banner without obscuring their facing nose.
+  const flagAttach = new Group();
+  flagAttach.name = 'flag-attach';
+  flagAttach.position.set(0, 1.55, 0);
+  group.add(flagAttach);
+
   // Stream the model if the archetype declared one. Asset loader returns
   // null synchronously when the file is missing, so heroes without a GLB
   // simply stay as the coloured cube.

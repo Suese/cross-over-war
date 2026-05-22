@@ -5,6 +5,12 @@ import { HostNet, ClientNet } from './net.js';
 import { startGameSession } from './game/bootstrap.js';
 import { listSaves, loadSave, deleteSave } from './game/persistence.js';
 import { MESSAGE_KINDS } from './game/protocol.js';
+import {
+  loadAllProfiles, saveProfile, deleteProfile,
+  loadActiveProfileKey, saveActiveProfileKey,
+  defaultLobbyProfile, paintPreview, lobbyEmblems,
+  sanitiseFlagConfig,
+} from './lobbyProfiles.js';
 
 const PLAYER_COLORS = ['#c81428', '#1a4a8a', '#1a8a50', '#d4a834', '#6a3aa8', '#c46a14'];
 
@@ -14,6 +20,11 @@ let client = null;     // ClientNet
 let myId = null;
 let myName = 'Commander';
 let roomCode = null;
+
+// Local player's flag profile — updated live as the user fiddles with the
+// editor, broadcast as part of `join` actions so the host (and through it,
+// every other client) can render this player's flag mesh.
+let myProfile = defaultLobbyProfile();
 
 let lobby = {
   players: [],
@@ -81,6 +92,180 @@ bindSliderOutput('max-castles', 'max-castles-value');
 bindSliderOutput('min-biomes',  'min-biomes-value');
 bindSliderOutput('max-biomes',  'max-biomes-value');
 installThresholdSlider();
+installProfileEditor();
+
+// ── Profile + flag editor ───────────────────────────────────────────────
+// Editor lives in the main lobby panel; controls bind to `myProfile` and
+// repaint a small live preview canvas whenever anything changes. Saved
+// profiles persist to localStorage so a returning player picks up where
+// they left off.
+function installProfileEditor() {
+  const previewCanvas = $('flag-preview-canvas');
+  const summaryCanvas = $('profile-summary-preview');
+  const stripeSelect = $('flag-stripe');
+  const emblemSelect = $('flag-emblem');
+  const colourInputs = [$('flag-colour-1'), $('flag-colour-2'), $('flag-colour-3')];
+  const emblemColour = $('flag-emblem-colour');
+  const profileSelect = $('profile-select');
+  if (!previewCanvas || !stripeSelect || !emblemSelect) return;
+
+  // Populate emblem dropdown from the lobby registry (modules have already
+  // registered their emblems via loadAllModules).
+  for (const emblem of lobbyEmblems()) {
+    const option = document.createElement('option');
+    option.value = emblem.id;
+    option.textContent = emblem.name;
+    emblemSelect.appendChild(option);
+  }
+
+  // Load profiles + active selection out of localStorage.
+  let profiles = loadAllProfiles();
+  let activeKey = loadActiveProfileKey();
+  if (activeKey && profiles[activeKey]) {
+    myProfile = {
+      name: profiles[activeKey].name ?? 'Commander',
+      flag: sanitiseFlagConfig(profiles[activeKey].flag),
+    };
+  }
+  refreshProfileDropdown();
+  applyProfileToInputs();
+  redrawPreview();
+
+  // ── Editor → state ────────────────────────────────────────────────────
+  function readEditorIntoProfile() {
+    myProfile = {
+      name: $('name-input').value.trim().slice(0, 16) || 'Commander',
+      flag: sanitiseFlagConfig({
+        colours: colourInputs.map(input => input.value),
+        stripe: stripeSelect.value,
+        emblemId: emblemSelect.value,
+        emblemColour: emblemColour.value,
+      }),
+    };
+  }
+
+  function onEditorChanged() {
+    readEditorIntoProfile();
+    redrawPreview();
+    // While a profile is selected, treat edits as an auto-save so closing
+    // the browser doesn't lose the change.
+    if (activeKey) {
+      saveProfile(activeKey, myProfile);
+      profiles = loadAllProfiles();
+    }
+    broadcastProfileIfInLobby();
+  }
+  for (const input of [...colourInputs, emblemColour, stripeSelect, emblemSelect]) {
+    input.addEventListener('input', onEditorChanged);
+    input.addEventListener('change', onEditorChanged);
+  }
+  $('name-input').addEventListener('input', onEditorChanged);
+
+  // ── State → editor ───────────────────────────────────────────────────
+  function applyProfileToInputs() {
+    $('name-input').value = myProfile.name;
+    stripeSelect.value = myProfile.flag.stripe;
+    emblemSelect.value = myProfile.flag.emblemId;
+    for (let i = 0; i < colourInputs.length; i++) {
+      colourInputs[i].value = hexToCss(myProfile.flag.colours[i]);
+    }
+    emblemColour.value = hexToCss(myProfile.flag.emblemColour);
+  }
+
+  function redrawPreview() {
+    paintPreview(previewCanvas, myProfile.flag);
+    if (summaryCanvas) paintPreview(summaryCanvas, myProfile.flag);
+  }
+
+  // ── Profile dropdown ─────────────────────────────────────────────────
+  function refreshProfileDropdown() {
+    const previousValue = profileSelect.value;
+    profileSelect.innerHTML = '';
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = profiles && Object.keys(profiles).length ? '— Custom (unsaved) —' : '— No saved profiles —';
+    profileSelect.appendChild(blank);
+    for (const key of Object.keys(profiles).sort()) {
+      const option = document.createElement('option');
+      option.value = key;
+      option.textContent = key;
+      profileSelect.appendChild(option);
+    }
+    profileSelect.value = activeKey && profiles[activeKey] ? activeKey : previousValue;
+    $('profile-delete').disabled = !activeKey || !profiles[activeKey];
+    $('profile-save').disabled = !activeKey || !profiles[activeKey];
+  }
+
+  profileSelect.addEventListener('change', () => {
+    const selected = profileSelect.value;
+    if (!selected) { activeKey = null; saveActiveProfileKey(null); refreshProfileDropdown(); return; }
+    const profile = profiles[selected];
+    if (!profile) return;
+    myProfile = {
+      name: profile.name ?? 'Commander',
+      flag: sanitiseFlagConfig(profile.flag),
+    };
+    activeKey = selected;
+    saveActiveProfileKey(activeKey);
+    applyProfileToInputs();
+    redrawPreview();
+    refreshProfileDropdown();
+    broadcastProfileIfInLobby();
+  });
+
+  $('profile-save').addEventListener('click', () => {
+    if (!activeKey) return;
+    readEditorIntoProfile();
+    saveProfile(activeKey, myProfile);
+    profiles = loadAllProfiles();
+    refreshProfileDropdown();
+  });
+
+  $('profile-save-as').addEventListener('click', () => {
+    readEditorIntoProfile();
+    const suggested = activeKey || myProfile.name || 'My profile';
+    const name = window.prompt('Save profile as:', suggested);
+    if (!name) return;
+    const trimmed = name.trim().slice(0, 40);
+    if (!trimmed) return;
+    saveProfile(trimmed, myProfile);
+    profiles = loadAllProfiles();
+    activeKey = trimmed;
+    saveActiveProfileKey(activeKey);
+    refreshProfileDropdown();
+  });
+
+  $('profile-delete').addEventListener('click', () => {
+    if (!activeKey) return;
+    if (!window.confirm('Delete profile "' + activeKey + '"?')) return;
+    deleteProfile(activeKey);
+    profiles = loadAllProfiles();
+    activeKey = null;
+    saveActiveProfileKey(null);
+    refreshProfileDropdown();
+  });
+}
+
+function hexToCss(value) {
+  const hex = (typeof value === 'number' ? value : 0xffffff) & 0xffffff;
+  return '#' + hex.toString(16).padStart(6, '0');
+}
+
+// Broadcast the local player's profile whenever it changes after the lobby
+// has been joined. The host stores it inside `lobby.players[i].profile`
+// and re-broadcasts; clients pick it up from the next lobby/init message.
+function broadcastProfileIfInLobby() {
+  if (mode === 'host') {
+    const slot = lobby.players.find(p => p.id === myId);
+    if (slot) {
+      slot.profile = myProfile;
+      broadcastLobby();
+      renderWaiting();
+    }
+  } else if (mode === 'client' && client) {
+    client.send({ type: 'profile_update', profile: myProfile });
+  }
+}
 
 // ── Threshold slider (two draggable handles, three regions) ─────────────
 function installThresholdSlider() {
@@ -243,6 +428,7 @@ async function startHost() {
       id: p.playerId,
       name: p.name,
       connected: false,
+      profile: p.profile ?? null,
     }));
     // Add the host themselves if not in the save (they'd usually be — match
     // by name, swap id; otherwise prepend).
@@ -250,11 +436,12 @@ async function startHost() {
     if (myMatch) {
       myMatch.id = myId;
       myMatch.connected = true;
+      myMatch.profile = myProfile;
     } else {
-      lobby.players.unshift({ id: myId, name: myName, connected: true });
+      lobby.players.unshift({ id: myId, name: myName, connected: true, profile: myProfile });
     }
   } else {
-    lobby.players = [{ id: myId, name: myName, connected: true }];
+    lobby.players = [{ id: myId, name: myName, connected: true, profile: myProfile }];
   }
 
   host.on('connect', (peerId) => {
@@ -274,18 +461,30 @@ async function startHost() {
     if (!data || typeof data !== 'object') return;
     if (data.type === 'join') {
       const name = String(data.name || 'Player').slice(0, 16);
+      const profile = data.profile ?? null;
       // Returning player? Match by name + disconnected slot; rebind id.
       const reusable = lobby.players.find(p => !p.connected && p.name === name);
       if (reusable) {
         reusable.id = fromId;
         reusable.connected = true;
+        if (profile) reusable.profile = profile;
       } else if (!lobby.players.some(p => p.id === fromId)) {
-        lobby.players.push({ id: fromId, name, connected: true });
+        lobby.players.push({ id: fromId, name, connected: true, profile });
       }
       broadcastLobby();
       renderWaiting();
       // If the game is already running, hand the client an init snapshot.
-      gameSession?.announceClientConnected?.(fromId, name);
+      gameSession?.announceClientConnected?.(fromId, name, profile);
+      return;
+    }
+    if (data.type === 'profile_update') {
+      const slot = lobby.players.find(p => p.id === fromId);
+      if (slot) {
+        slot.profile = data.profile ?? slot.profile;
+        broadcastLobby();
+        renderWaiting();
+        gameSession?.updatePlayerProfile?.(fromId, slot.profile);
+      }
       return;
     }
     if (data.type === 'action') {
@@ -331,7 +530,7 @@ async function startClient() {
     setStatus('Failed to connect: ' + msg(err));
     return;
   }
-  client.send({ type: 'join', name: myName });
+  client.send({ type: 'join', name: myName, profile: myProfile });
   roomCode = code;
   mode = 'client';
   enterWaiting();
@@ -385,7 +584,11 @@ function startHostSession() {
   show('game-ui');
   const canvas = $('board');
   const hudRoot = $('game-ui');
-  const players = lobby.players.map(p => ({ playerId: p.id, name: p.name }));
+  const players = lobby.players.map(p => ({
+    playerId: p.id,
+    name: p.name,
+    profile: p.profile ?? null,
+  }));
   const mapSize = pendingSaveSnapshot ? null : readSelectedMapSize();
   const biomeSettings = pendingSaveSnapshot ? null : readBiomeSettings();
   const terrainThresholds = pendingSaveSnapshot ? null : readTerrainThresholds();
@@ -418,7 +621,11 @@ function startClientSession() {
   show('game-ui');
   const canvas = $('board');
   const hudRoot = $('game-ui');
-  const players = lobby.players.map(p => ({ playerId: p.id, name: p.name }));
+  const players = lobby.players.map(p => ({
+    playerId: p.id,
+    name: p.name,
+    profile: p.profile ?? null,
+  }));
   gameSession = startGameSession({
     mode: 'client',
     canvas,

@@ -27,8 +27,9 @@ import {
 import { hexToPixel } from '../map/hex.js';
 import { buildHeroMesh, setHeroPosition } from './heroMesh.js';
 import { buildPathOverlay } from './pathOverlay.js';
-import { playerColorHex } from './playerColors.js';
 import { forEachEntityWith, getComponent, hasComponent } from '../ecs/world.js';
+import { getEffectiveTerrainAt } from '../map/pathfinding.js';
+import { buildFlagMesh, applyFlagConfig, disposeFlagMesh } from './flagMesh.js';
 
 const HEX_SIZE = 1.0;
 const CAMERA_DOWN_ANGLE_DEGREES = 80;
@@ -131,6 +132,18 @@ export function createSceneRenderer(canvas) {
   const meshGraveyard = new Map();   // entityId → { mesh, removeAt }
   let activePathOverlay = null;
 
+  // Flag profile lookup keyed by playerId. Populated by the bootstrap via
+  // `setFlagConfigForPlayer` — the renderer never knows where the configs
+  // came from (lobby UI, localStorage, server delta), it just paints them.
+  // Each mounted flag stashes the config it was last painted with under
+  // `userData.flagConfig` so we can detect changes cheaply.
+  const flagConfigByPlayerId = new Map();
+  function setFlagConfigForPlayer(playerId, flagConfig) {
+    if (!playerId) return;
+    flagConfigByPlayerId.set(playerId, flagConfig ?? null);
+  }
+  function clearFlagConfigs() { flagConfigByPlayerId.clear(); }
+
   function syncObjects(world, viewerPlayerId, registry, assets, options = {}) {
     const heroAnimations = options.heroAnimations;
     const fogOverride = options.fogOverride;
@@ -176,12 +189,18 @@ export function createSceneRenderer(canvas) {
       let displayQ = position.q;
       let displayR = position.r;
       if (animation) {
-        mesh.position.set(animation.x, 0, animation.z);
+        // Interpolate Y across the step so the hero rides up and down hills
+        // rather than snapping at tile boundaries.
+        const fromHeight = terrainHeightAt(world, registry, animation.fromQ, animation.fromR);
+        const toHeight = terrainHeightAt(world, registry, animation.currentQ, animation.currentR);
+        const y = fromHeight + (toHeight - fromHeight) * animation.stepFraction;
+        mesh.position.set(animation.x, y, animation.z);
         mesh.quaternion.copy(heroAnimations.quaternionForYaw(animation.yaw));
         displayQ = animation.currentQ;
         displayR = animation.currentR;
       } else {
         setHeroPosition(mesh, position.q, position.r, HEX_SIZE);
+        mesh.position.y = terrainHeightAt(world, registry, position.q, position.r);
         // Clear any leftover yaw from a previous animation.
         mesh.quaternion.identity();
       }
@@ -189,6 +208,7 @@ export function createSceneRenderer(canvas) {
       const displayKey = displayQ + ',' + displayR;
       const heroVisible = !fog || fogVisibleSet?.has(displayKey) || ownerPlayerId === viewerPlayerId;
       mesh.visible = heroVisible;
+      mountOrUpdateFlag(mesh, world, registry, entityId);
     });
 
     forEachEntityWith(world, ['MapObject', 'Position'], (entityId, mapObject, position) => {
@@ -204,16 +224,11 @@ export function createSceneRenderer(canvas) {
         objectMeshesByEntityId.set(entityId, mesh);
       }
       const point = hexToPixel(position.q, position.r, HEX_SIZE);
-      mesh.position.set(point.x, 0, point.z);
+      mesh.position.set(point.x, terrainHeightAt(world, registry, position.q, position.r), point.z);
       // Map objects don't move, so revealing them once is enough — show them
       // both when visible and explored, but keep them hidden under shroud.
       mesh.visible = !fog || fogVisibleSet?.has(objectKey) || fogExploredSet?.has(objectKey);
-      // Conquest flag — generic convention: if the mesh has children named
-      // 'conquest-flag' and/or 'conquest-flag-pole', the renderer tints them
-      // to the owner's colour and toggles visibility based on the entity's
-      // Ownership + Conquerable components. Mesh authors opt in just by
-      // adding those named children to their buildMesh output.
-      updateConquestFlag(mesh, world, entityId);
+      mountOrUpdateFlag(mesh, world, registry, entityId);
     });
 
     // Move missing entities' meshes into the graveyard for a short grace
@@ -234,9 +249,19 @@ export function createSceneRenderer(canvas) {
   // Remove a mesh from the scene and let any streaming subscriber release
   // its asset refcount. Meshes built via `buildHeroMesh` /
   // `buildMapObjectMesh` stash a `userData.assetRelease` callback so the LRU
-  // cache learns they're no longer pinning a model.
+  // cache learns they're no longer pinning a model. Any mounted flag also
+  // needs its GPU resources disposed so we don't leak textures across map
+  // rebuilds.
   function releaseAndRemoveMesh(mesh) {
     objectGroup.remove(mesh);
+    const attach = mesh.getObjectByName?.('flag-attach');
+    if (attach) {
+      const mounted = attach.children.find(child => child.name === 'mounted-flag');
+      if (mounted) {
+        attach.remove(mounted);
+        disposeFlagMesh(mounted);
+      }
+    }
     mesh.userData?.assetRelease?.();
   }
 
@@ -342,25 +367,53 @@ export function createSceneRenderer(canvas) {
     zoomCamera,
     centerOnHex,
     screenToWorldGroundPoint,
+    setFlagConfigForPlayer,
+    clearFlagConfigs,
     render,
   };
 }
 
-function updateConquestFlag(meshGroup, world, entityId) {
-  const flagCloth = meshGroup.getObjectByName?.('conquest-flag');
-  const flagPole = meshGroup.getObjectByName?.('conquest-flag-pole');
-  if (!flagCloth && !flagPole) return;
-  const isConquerable = hasComponent(world, entityId, 'Conquerable');
+// Look up the elevation a hero or map object should sit at for a given hex.
+// Falls through to 0 when the tile or terrain isn't registered (e.g. a hero
+// on a hex outside the map during a transition).
+function terrainHeightAt(world, registry, q, r) {
+  const terrain = getEffectiveTerrainAt(world, registry, q, r);
+  return terrain?.tileHeight ?? 0;
+}
+
+// Mount or repaint the player-customised flag on an entity that has both
+// `BearsFlag` and `Ownership`. The entity's mesh must expose a Group named
+// `flag-attach` placed at the desired pole base — the flag becomes a child
+// of that group. Re-runs each frame for entities we render, but skips the
+// expensive texture repaint when the cached flag config hasn't changed.
+function mountOrUpdateFlag(meshRoot, world, registry, entityId) {
+  if (!meshRoot?.getObjectByName) return;
+  const attach = meshRoot.getObjectByName('flag-attach');
+  if (!attach) return;
+  const wantsFlag = hasComponent(world, entityId, 'BearsFlag');
   const ownership = getComponent(world, entityId, 'Ownership');
   const ownerId = ownership?.playerId ?? null;
-  const visible = isConquerable && !!ownerId;
-  if (flagCloth) {
-    flagCloth.visible = visible;
-    if (visible && flagCloth.material?.color) {
-      flagCloth.material.color.setHex(playerColorHex(ownerId));
+  let mounted = attach.children.find(child => child.name === 'mounted-flag');
+  if (!wantsFlag || !ownerId) {
+    if (mounted) {
+      attach.remove(mounted);
+      disposeFlagMesh(mounted);
     }
+    return;
   }
-  if (flagPole) flagPole.visible = visible;
+  const config = flagConfigByPlayerId.get(ownerId) ?? null;
+  if (!mounted) {
+    mounted = buildFlagMesh(config, registry);
+    mounted.userData.flagSourceRef = config;
+    attach.add(mounted);
+    return;
+  }
+  // Repaint when the config reference shifts (cheap pointer compare — the
+  // bootstrap only swaps configs when the player actually edits them).
+  if (mounted.userData?.flagSourceRef !== config) {
+    applyFlagConfig(mounted, config, registry);
+    mounted.userData.flagSourceRef = config;
+  }
 }
 
 function viewerFog(world, viewerPlayerId) {

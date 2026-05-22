@@ -19,6 +19,11 @@ import {
 import { hexToPixel } from '../map/hex.js';
 
 const ARROW_OFFSET_Y = 0.05;
+// Path overlays always draw on top of the terrain — `depthTest: false`
+// keeps them visible behind hills, mountains, and trees, and the renderOrder
+// makes sure they paint after the terrain layer (which still uses normal
+// depth testing) so the late-drawn arrow wins.
+const PATH_RENDER_ORDER = 999;
 // The cone's tip points along its local +Y. We use that as the reference
 // vector when computing the quaternion to align the arrow with a path step.
 const CONE_DEFAULT_AXIS = new Vector3(0, 1, 0);
@@ -28,8 +33,16 @@ function makeArrowMesh(colourHex) {
   // setting rotation.x and rotation.z mixes through XYZ Euler order and
   // mirrors the X component of the desired direction.
   const geometry = new ConeGeometry(0.18, 0.55, 8);
-  const material = new MeshBasicMaterial({ color: new Color(colourHex), transparent: true, opacity: 0.95 });
-  return new Mesh(geometry, material);
+  const material = new MeshBasicMaterial({
+    color: new Color(colourHex),
+    transparent: true,
+    opacity: 0.95,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const mesh = new Mesh(geometry, material);
+  mesh.renderOrder = PATH_RENDER_ORDER;
+  return mesh;
 }
 
 function orientAlong(mesh, directionX, directionZ) {
@@ -50,8 +63,14 @@ function makeXSprite(colourHex) {
   ctx.beginPath(); ctx.moveTo(12, 12); ctx.lineTo(52, 52); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(52, 12); ctx.lineTo(12, 52); ctx.stroke();
   const texture = new CanvasTexture(canvas);
-  const sprite = new Sprite(new SpriteMaterial({ map: texture, transparent: true }));
+  const sprite = new Sprite(new SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  }));
   sprite.scale.set(0.9, 0.9, 1);
+  sprite.renderOrder = PATH_RENDER_ORDER;
   return sprite;
 }
 

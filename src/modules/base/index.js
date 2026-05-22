@@ -11,6 +11,7 @@ import {
   registerPrefab,
   registerHero,
   registerActionType,
+  registerEmblem,
   setBaseDecorator,
   declareAssetReference,
 } from '../../game/ecs/registry.js';
@@ -27,6 +28,111 @@ export default {
     // ── Action types ────────────────────────────────────────────────────
     registerActionType(registry, { id: 'base/take',  icon: '🫳', label: 'Take' });
     registerActionType(registry, { id: 'base/visit', icon: '🚩', label: 'Visit' });
+
+    // ── Flag emblems ────────────────────────────────────────────────────
+    // Players pick one of these in the lobby flag editor; the renderer paints
+    // it in their chosen emblem colour onto the centre of the flag cloth.
+    // The `draw` function fills a `size`×`size` canvas — keep shapes inside
+    // ~85% of the bounds so they read at thumbnail scales.
+    registerEmblem(registry, {
+      id: 'base/blank', name: 'Blank',
+      draw: () => { /* intentionally empty — solid stripes only */ },
+    });
+    registerEmblem(registry, {
+      id: 'base/sun', name: 'Sun',
+      draw: (ctx, size, colourHex) => {
+        ctx.fillStyle = '#' + colourHex.toString(16).padStart(6, '0');
+        const cx = size / 2, cy = size / 2;
+        const innerRadius = size * 0.18;
+        const rayInner = size * 0.22;
+        const rayOuter = size * 0.42;
+        ctx.beginPath(); ctx.arc(cx, cy, innerRadius, 0, Math.PI * 2); ctx.fill();
+        for (let i = 0; i < 12; i++) {
+          const angle = (i / 12) * Math.PI * 2;
+          const xa = cx + Math.cos(angle) * rayInner;
+          const ya = cy + Math.sin(angle) * rayInner;
+          const xb = cx + Math.cos(angle) * rayOuter;
+          const yb = cy + Math.sin(angle) * rayOuter;
+          ctx.lineWidth = size * 0.06;
+          ctx.strokeStyle = ctx.fillStyle;
+          ctx.lineCap = 'round';
+          ctx.beginPath(); ctx.moveTo(xa, ya); ctx.lineTo(xb, yb); ctx.stroke();
+        }
+      },
+    });
+    registerEmblem(registry, {
+      id: 'base/skull', name: 'Skull',
+      draw: (ctx, size, colourHex) => {
+        ctx.fillStyle = '#' + colourHex.toString(16).padStart(6, '0');
+        const cx = size / 2, cy = size * 0.46;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, size * 0.28, size * 0.32, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Eye sockets — punch with destination-out so we can see whatever the
+        // cloth painted underneath.
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath(); ctx.arc(cx - size * 0.10, cy - size * 0.02, size * 0.06, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx + size * 0.10, cy - size * 0.02, size * 0.06, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+        // Jaw teeth — small fill rectangle on top of the cloth.
+        ctx.fillRect(cx - size * 0.12, cy + size * 0.20, size * 0.24, size * 0.08);
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-out';
+        for (let i = -2; i <= 2; i++) {
+          ctx.fillRect(cx + i * size * 0.05 - size * 0.012, cy + size * 0.20, size * 0.024, size * 0.08);
+        }
+        ctx.restore();
+      },
+    });
+    registerEmblem(registry, {
+      id: 'base/crescent', name: 'Crescent',
+      draw: (ctx, size, colourHex) => {
+        ctx.fillStyle = '#' + colourHex.toString(16).padStart(6, '0');
+        const cx = size / 2, cy = size / 2;
+        ctx.beginPath(); ctx.arc(cx, cy, size * 0.36, 0, Math.PI * 2); ctx.fill();
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath(); ctx.arc(cx + size * 0.12, cy, size * 0.32, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      },
+    });
+    registerEmblem(registry, {
+      id: 'base/eye', name: 'Eye',
+      draw: (ctx, size, colourHex) => {
+        const colour = '#' + colourHex.toString(16).padStart(6, '0');
+        const cx = size / 2, cy = size / 2;
+        ctx.strokeStyle = colour;
+        ctx.fillStyle = colour;
+        ctx.lineWidth = size * 0.05;
+        // Outer almond.
+        ctx.beginPath();
+        ctx.moveTo(cx - size * 0.36, cy);
+        ctx.quadraticCurveTo(cx, cy - size * 0.34, cx + size * 0.36, cy);
+        ctx.quadraticCurveTo(cx, cy + size * 0.34, cx - size * 0.36, cy);
+        ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx, cy, size * 0.11, 0, Math.PI * 2); ctx.fill();
+      },
+    });
+    registerEmblem(registry, {
+      id: 'base/star', name: 'Star',
+      draw: (ctx, size, colourHex) => {
+        ctx.fillStyle = '#' + colourHex.toString(16).padStart(6, '0');
+        const cx = size / 2, cy = size / 2;
+        const outer = size * 0.4, inner = size * 0.18;
+        ctx.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const angle = -Math.PI / 2 + i * Math.PI / 5;
+          const radius = i % 2 === 0 ? outer : inner;
+          const x = cx + Math.cos(angle) * radius;
+          const y = cy + Math.sin(angle) * radius;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.fill();
+      },
+    });
 
     // ── Terrain definitions ─────────────────────────────────────────────
     // The base mapgen produces a coarse classification — plains for any
@@ -55,6 +161,7 @@ export default {
       fallbackColor: 0x8fcc6a,
       textureKey: 'base/grass.png',
       modelKey: 'base/plains.glb',
+      tileHeight: 0,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'texture',
@@ -76,6 +183,7 @@ export default {
       },
       fallbackColor: 0x6ea84a,
       modelKey: 'base/grassy-hills.glb',
+      tileHeight: 0.25,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'model',
@@ -87,13 +195,14 @@ export default {
       name: 'Forest',
       description: 'Dense trees and undergrowth. Slow going on foot.',
       components: {
-        PassableByLand: { cost: 20 },
+        PassableByLand: { cost: 80 },
         PassableByAir: { cost: 1 },
         // Trees can be felled — workable, but more expensive than open ground.
         WorkableTerrain: { cost: 5 },
       },
       fallbackColor: 0x355e36,
       modelKey: 'base/forest.glb',
+      tileHeight: 0,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'model',
@@ -112,6 +221,7 @@ export default {
       },
       fallbackColor: 0x44653c,
       modelKey: 'base/forest-hills.glb',
+      tileHeight: 0.35,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'model',
@@ -130,6 +240,7 @@ export default {
       fallbackColor: 0xa68a5e,
       textureKey: 'base/mountain.png',
       modelKey: 'base/dusty-hills.glb',
+      tileHeight: 0.3,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'texture',
@@ -145,11 +256,12 @@ export default {
       name: 'Mountain',
       description: 'Sheer rock and treacherous footing. Only the determined press through on foot.',
       components: {
-        PassableByLand: { cost: 80 },
+        PassableByLand: { cost: 120 },
         PassableByAir: { cost: 1 },
       },
       fallbackColor: 0x6e5d48,
       modelKey: 'base/mountains.glb',
+      tileHeight: 0.7,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'model',
@@ -167,6 +279,7 @@ export default {
       fallbackColor: 0x2c6691,
       textureKey: 'base/water.png',
       modelKey: 'base/deep-ocean.glb',
+      tileHeight: 0,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'texture',
@@ -187,6 +300,7 @@ export default {
       },
       fallbackColor: 0x6cb4d4,
       modelKey: 'base/shallow-ocean.glb',
+      tileHeight: 0,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'model',
@@ -202,6 +316,7 @@ export default {
       },
       fallbackColor: 0x3a4d24,
       modelKey: 'base/bramble.glb',
+      tileHeight: 0,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'model',
@@ -237,6 +352,9 @@ export default {
       addComponent(world, entityId, 'Ownership', { playerId: params.playerId ?? null });
       addComponent(world, entityId, 'BlocksMovement', {});
       addComponent(world, entityId, 'TraversesLand', {});
+      // Every hero carries their player's flag — the renderer mounts a
+      // generic flag mesh onto the entity's `flag-attach` child.
+      addComponent(world, entityId, 'BearsFlag', {});
       return entityId;
     });
 

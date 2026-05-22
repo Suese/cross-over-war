@@ -20,8 +20,8 @@
 // assigned to the castle.
 
 import {
-  CylinderGeometry, ConeGeometry, SphereGeometry, BoxGeometry, PlaneGeometry,
-  Mesh, MeshStandardMaterial, Group, DoubleSide,
+  CylinderGeometry, ConeGeometry, SphereGeometry, BoxGeometry,
+  Mesh, MeshStandardMaterial, Group,
 } from 'three';
 import { createEntity, addComponent, getComponent, forEachEntityWith } from '../../game/ecs/world.js';
 import {
@@ -120,6 +120,7 @@ export default {
       addComponent(world, poiId, 'Visitable', { message: params.message ?? HUT_DEFAULT_MESSAGE });
       addComponent(world, poiId, 'Actionable', { actionTypeId: 'base/visit' });
       addComponent(world, poiId, 'Conquerable', {});
+      addComponent(world, poiId, 'BearsFlag', {});
       for (const offset of HUT_FOOTPRINT_OFFSETS) {
         const wallId = createEntity(world);
         addComponent(world, wallId, 'Position', { q: anchorQ + offset.dq, r: anchorR + offset.dr });
@@ -145,6 +146,7 @@ export default {
       addComponent(world, poiId, 'Visitable', { message: params.message ?? CASTLE_DEFAULT_MESSAGE });
       addComponent(world, poiId, 'Actionable', { actionTypeId: 'base/visit' });
       addComponent(world, poiId, 'Conquerable', {});
+      addComponent(world, poiId, 'BearsFlag', {});
       // Castle tag — defeat condition queries for entities with this.
       addComponent(world, poiId, 'Castle', {});
       // BiomeAnchor — the engine maps every nearby tile to this anchor and
@@ -350,24 +352,12 @@ function buildMushroomHutMesh() {
   cap.scale.set(1.0, 0.7, 1.0);
   cap.castShadow = true;
   inner.add(cap);
-  const flagPole = new Mesh(
-    new CylinderGeometry(0.025, 0.025, 0.65, 6),
-    new MeshStandardMaterial({ color: 0x222a36, roughness: 0.6 }),
-  );
-  flagPole.position.set(0, 2.32, 0);
-  flagPole.name = 'conquest-flag-pole';
-  flagPole.visible = false;
-  inner.add(flagPole);
-  const flagCloth = new Mesh(
-    new PlaneGeometry(0.42, 0.26),
-    new MeshStandardMaterial({
-      color: 0xffffff, roughness: 0.7, metalness: 0.0, side: DoubleSide, emissive: 0x000000,
-    }),
-  );
-  flagCloth.position.set(0.225, 2.5, 0);
-  flagCloth.name = 'conquest-flag';
-  flagCloth.visible = false;
-  inner.add(flagCloth);
+  // Flag attachment point — the renderer mounts the player's generic flag
+  // mesh here whenever the entity carries a `BearsFlag` + `Ownership` pair.
+  const flagAttach = new Group();
+  flagAttach.name = 'flag-attach';
+  flagAttach.position.set(0, 2.0, 0);
+  inner.add(flagAttach);
   const spotMaterial = new MeshStandardMaterial({ color: 0xfaf0e0, roughness: 0.7 });
   const spots = [
     { x: -0.40, y: 1.86, z: -0.35 },
@@ -431,25 +421,13 @@ function buildCastleMesh() {
   gate.position.set(0, 0.21, 0.86);
   inner.add(gate);
 
-  // Conquest flag on the keep spire — named submeshes the renderer tints.
-  const flagPole = new Mesh(
-    new CylinderGeometry(0.03, 0.03, 0.65, 6),
-    new MeshStandardMaterial({ color: 0x2a2520, roughness: 0.6 }),
-  );
-  flagPole.position.set(0, 2.55, 0);
-  flagPole.name = 'conquest-flag-pole';
-  flagPole.visible = false;
-  inner.add(flagPole);
-  const flagCloth = new Mesh(
-    new PlaneGeometry(0.46, 0.3),
-    new MeshStandardMaterial({
-      color: 0xffffff, roughness: 0.65, side: DoubleSide,
-    }),
-  );
-  flagCloth.position.set(0.245, 2.74, 0);
-  flagCloth.name = 'conquest-flag';
-  flagCloth.visible = false;
-  inner.add(flagCloth);
+  // Flag attachment point — replaces the older conquest-flag/conquest-flag-pole
+  // convention. Once a Conquerable castle has an owner, the renderer mounts
+  // the owner's configured flag mesh as a child of this group.
+  const flagAttach = new Group();
+  flagAttach.name = 'flag-attach';
+  flagAttach.position.set(0, 2.225, 0);
+  inner.add(flagAttach);
 
   const outer = new Group();
   outer.add(inner);

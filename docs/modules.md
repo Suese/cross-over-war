@@ -129,6 +129,7 @@ registerTerrain(registry, {
   fallbackColor: 0x6ea84a,
   modelKey:   'base/grassy-hills.glb',  // preferred — 3D tile model
   textureKey: 'base/grass.png',         // optional — used by the cylinder fallback
+  tileHeight: 0.25,                     // optional — see "Tile height"
 });
 ```
 
@@ -141,6 +142,7 @@ registerTerrain(registry, {
 | `modelKey`     | Optional asset-loader key for a `.glb` / `.gltf` tile model. When set, the renderer walks the GLB scene and creates one `InstancedMesh` per submesh; the submesh's local transform is baked into each instance, so a hex base with trees-on-top still tiles correctly. |
 | `fallbackColor`| `THREE.Color`-compatible hex. Used by the cylinder fallback when no `modelKey` is set or the model is missing. |
 | `textureKey`   | Optional asset-loader key for a texture. Wraps the cylinder fallback only — ignored when a `modelKey` model is present. |
+| `tileHeight`   | Optional positive number (world units). The visual elevation of the tile's "top". Heroes and map objects standing on the tile have their mesh raised by this much, and the value interpolates during a hero's walk animation so they ride up and over hills. Defaults to `0`. |
 
 The renderer creates one `InstancedMesh` per submesh per terrain id, so a
 forest tile with `base + trunk + canopy` submeshes draws as three
@@ -492,13 +494,19 @@ addComponent(world, poiId, 'Conquerable', {});
 ```
 
 The hover HUD and right-click info panel both gain a `⚑ Owned by [name]`
-line tinted to the owner's player colour. The renderer also tints any
-child mesh named `conquest-flag` (and shows its companion
-`conquest-flag-pole`) to the owner's colour, so a flag on top of the
-structure visually tracks the conquest — give your `buildMesh` a
-`Mesh` named `conquest-flag` (a plane with the right material) and one
-named `conquest-flag-pole` to opt in. Both start `visible = false`; the
-renderer flips them on once an `Ownership` component appears.
+line tinted to the owner's player colour.
+
+**Every Conquerable POI must include a flag in its `buildMesh` output.**
+Add two named children:
+
+- a `Mesh` named `conquest-flag` — the cloth (a plane with a writable material).
+- a `Mesh` named `conquest-flag-pole` — the pole the cloth hangs from.
+
+Both can be created with `visible: false`; the renderer takes over visibility
+each frame. Unclaimed Conquerable POIs render the flag white; once an
+`Ownership` component lands on the entity the cloth re-tints to the owner's
+player colour. Non-Conquerable entities leave the flag children hidden, so
+the same mesh can be reused outside conquest contexts.
 
 A Conquerable on a `ConsumedOnVisit` entity is allowed but pointless —
 the entity gets destroyed in the same delta as the conquest.
