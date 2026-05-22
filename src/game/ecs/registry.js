@@ -12,7 +12,9 @@ export function createRegistry() {
     heroes: new Map(),      // id → hero archetype { name, prefabId, stats... }
     mapObjectTypes: new Map(),  // id → { name, prefabId, buildMesh, onVisit? }
     actionTypes: new Map(),     // id → { icon, label } — UI templates referenced by the Actionable component
-    worldSpawners: [],      // [(context) => void] — invoked once after map-gen + hero placement
+    biomeDecorators: new Map(), // id → decorate({ world, registry, biomeHexes, anchor*, seed, mapWidth, mapHeight, occupiedHexes })
+    baseDecorator: null,        // optional decorator that runs once over every tile not claimed by a biome
+    worldSpawners: [],      // [(context) => void] — invoked once after biomes + base decorator
     assetReferences: [],    // [{ moduleName, kind, id, path }] — for audit
   };
 }
@@ -74,13 +76,44 @@ export function getActionType(registry, actionTypeId) {
 
 // Register a function that scatters entities across the freshly-generated
 // world. Each spawner is invoked once at the start of a new game, after
-// terrain and hero spawns but before fog initialisation. The context object
+// terrain, castles, heroes, biome decorators, and the base decorator have
+// all run — i.e., very last in the setup pipeline. The context object
 // carries the world, registry, map dimensions, seed, and a mutable Set of
-// 'q,r' keys that have already been claimed — spawners should add their own
-// placements to this Set so later spawners don't collide.
+// 'q,r' keys that have already been claimed.
 export function registerWorldSpawner(registry, spawnerFn) {
   if (typeof spawnerFn !== 'function') throw new Error('registerWorldSpawner: function required');
   registry.worldSpawners.push(spawnerFn);
+}
+
+// Register a biome decorator. Castles reference a decorator by id via the
+// BiomeAnchor component on the castle entity; the engine runs each
+// decorator once over the hexes assigned to its anchor.
+//
+// The `decorate` function receives a context object:
+//   {
+//     world, registry,
+//     anchorEntityId,                  // the castle / anchor entity
+//     anchorQ, anchorR,                // anchor's hex
+//     biomeHexes: [{ entityId, q, r }],// tiles in this biome
+//     mapWidth, mapHeight, seed,       // for noise-driven placement
+//     occupiedHexes,                   // mutable Set<"q,r"> — read before placing, add after
+//   }
+export function registerBiomeDecorator(registry, definition) {
+  if (!definition.id) throw new Error('registerBiomeDecorator: id required');
+  if (typeof definition.decorate !== 'function') throw new Error('registerBiomeDecorator: decorate(fn) required');
+  if (registry.biomeDecorators.has(definition.id)) {
+    throw new Error('biome decorator id already registered: ' + definition.id);
+  }
+  registry.biomeDecorators.set(definition.id, definition);
+}
+
+// Set the global base decorator — runs once over every tile that isn't
+// claimed by any biome. There's only one (the most recently set wins) so a
+// late-loading module can replace it cleanly. Context shape:
+//   { world, registry, hexes: [{ entityId, q, r }], mapWidth, mapHeight, seed }
+export function setBaseDecorator(registry, decorate) {
+  if (typeof decorate !== 'function') throw new Error('setBaseDecorator: function required');
+  registry.baseDecorator = { decorate };
 }
 
 // Record that a definition expects to find a particular asset on disk.

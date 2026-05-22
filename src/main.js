@@ -65,6 +65,104 @@ $('copy-code').addEventListener('click', () => {
   setTimeout(() => { btn.textContent = prev; }, 1500);
 });
 
+// ── Slider value bindings ───────────────────────────────────────────────
+// Each range input mirrors its current value into the paired <output> tag
+// so the user can see what they're picking without playing slider-by-feel.
+function bindSliderOutput(inputId, outputId) {
+  const input = $(inputId);
+  const output = $(outputId);
+  if (!input || !output) return;
+  const sync = () => { output.value = input.value; };
+  input.addEventListener('input', sync);
+  sync();
+}
+bindSliderOutput('min-castles', 'min-castles-value');
+bindSliderOutput('max-castles', 'max-castles-value');
+bindSliderOutput('min-biomes',  'min-biomes-value');
+bindSliderOutput('max-biomes',  'max-biomes-value');
+installThresholdSlider();
+
+// ── Threshold slider (two draggable handles, three regions) ─────────────
+function installThresholdSlider() {
+  const slider = $('threshold-slider');
+  if (!slider) return;
+  const handleSea = $('threshold-handle-sea');
+  const handleMountain = $('threshold-handle-mountain');
+  const regionSea = $('threshold-region-sea');
+  const regionLand = $('threshold-region-land');
+  const regionMountain = $('threshold-region-mountain');
+  const output = $('threshold-value');
+
+  function readState() {
+    return {
+      sea: clampUnit(Number(slider.dataset.sea)),
+      mountain: clampUnit(Number(slider.dataset.mountain)),
+    };
+  }
+  function writeState(state) {
+    // Keep the handles ordered with a small gap so the land band always
+    // has somewhere to live.
+    const minGap = 0.05;
+    let { sea, mountain } = state;
+    sea = clampUnit(sea);
+    mountain = clampUnit(mountain);
+    if (mountain < sea + minGap) mountain = Math.min(1, sea + minGap);
+    if (sea > mountain - minGap) sea = Math.max(0, mountain - minGap);
+    slider.dataset.sea = String(sea);
+    slider.dataset.mountain = String(mountain);
+    render(sea, mountain);
+  }
+  function render(sea, mountain) {
+    handleSea.style.left = (sea * 100) + '%';
+    handleMountain.style.left = (mountain * 100) + '%';
+    regionSea.style.width = (sea * 100) + '%';
+    regionLand.style.left = (sea * 100) + '%';
+    regionLand.style.width = ((mountain - sea) * 100) + '%';
+    regionMountain.style.left = (mountain * 100) + '%';
+    regionMountain.style.width = ((1 - mountain) * 100) + '%';
+    if (output) output.value = Math.round(sea * 100) + '% · ' + Math.round(mountain * 100) + '%';
+  }
+
+  function startDrag(handle, event) {
+    event.preventDefault();
+    const which = handle.dataset.handle;
+    function onMove(moveEvent) {
+      const rect = slider.getBoundingClientRect();
+      const t = clampUnit((moveEvent.clientX - rect.left) / rect.width);
+      const current = readState();
+      if (which === 'sea') writeState({ sea: t, mountain: current.mountain });
+      else writeState({ sea: current.sea, mountain: t });
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  handleSea.addEventListener('pointerdown', (e) => startDrag(handleSea, e));
+  handleMountain.addEventListener('pointerdown', (e) => startDrag(handleMountain, e));
+
+  // First render reads the initial values from data-* attributes.
+  const initial = readState();
+  writeState(initial);
+}
+
+function clampUnit(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function readTerrainThresholds() {
+  const slider = $('threshold-slider');
+  const sea = clampUnit(Number(slider?.dataset.sea ?? 0.4));
+  const mountain = clampUnit(Number(slider?.dataset.mountain ?? 0.725));
+  return {
+    seaThreshold: sea,
+    mountainThreshold: Math.max(sea + 0.05, mountain),
+  };
+}
+
 function toggleSavedGamesList() {
   const container = $('saved-games');
   if (!container.classList.contains('hidden')) {
@@ -262,12 +360,13 @@ function renderWaiting() {
     list.appendChild(li);
   });
   $('host-controls').style.display = mode === 'host' ? '' : 'none';
-  // The map-size dropdown is only meaningful for fresh games — a saved game
-  // carries its own map dimensions, and picking a different size at resume
-  // time would just be ignored.
-  const mapSizeRow = $('map-size-row');
-  if (mapSizeRow) {
-    mapSizeRow.style.display = (mode === 'host' && !pendingSaveSnapshot) ? '' : 'none';
+  // Settings rows are only meaningful for fresh games — a saved game carries
+  // its own map dimensions + biome layout, and resuming should ignore the
+  // host's lobby slider state.
+  const freshGame = mode === 'host' && !pendingSaveSnapshot;
+  for (const id of ['map-size-row', 'min-castles-row', 'max-castles-row', 'min-biomes-row', 'max-biomes-row', 'threshold-row']) {
+    const el = $(id);
+    if (el) el.style.display = freshGame ? '' : 'none';
   }
   const connectedCount = lobby.players.filter(p => p.connected !== false).length;
   $('start-btn').disabled = connectedCount < 2 && !pendingSaveSnapshot;
@@ -288,6 +387,8 @@ function startHostSession() {
   const hudRoot = $('game-ui');
   const players = lobby.players.map(p => ({ playerId: p.id, name: p.name }));
   const mapSize = pendingSaveSnapshot ? null : readSelectedMapSize();
+  const biomeSettings = pendingSaveSnapshot ? null : readBiomeSettings();
+  const terrainThresholds = pendingSaveSnapshot ? null : readTerrainThresholds();
   gameSession = startGameSession({
     mode: 'host',
     canvas,
@@ -296,6 +397,8 @@ function startHostSession() {
     players,
     loadFromSnapshot: pendingSaveSnapshot,
     mapSize,
+    biomeSettings,
+    terrainThresholds,
     net: {
       broadcast: (message) => host?.broadcast(message),
       sendTo: (peerId, message) => host?.sendTo(peerId, message),
@@ -381,4 +484,25 @@ function readSelectedMapSize() {
   // Allow 64 / 128 / 256 only — anything else falls back to the safe default.
   const dimension = [64, 128, 256].includes(raw) ? raw : 64;
   return { width: dimension, height: dimension };
+}
+
+function readBiomeSettings() {
+  // Read raw slider values; gameRoom does the final clamping (e.g. floor
+  // min-castles at numPlayers so every player still gets a castle).
+  const minCastles = clampInt($('min-castles')?.value, 1, 8, 2);
+  const maxCastles = clampInt($('max-castles')?.value, 1, 8, 2);
+  const minBiomes  = clampInt($('min-biomes')?.value,  0, 8, 0);
+  const maxBiomes  = clampInt($('max-biomes')?.value,  0, 8, 2);
+  return {
+    minCastles: Math.min(minCastles, maxCastles),
+    maxCastles: Math.max(minCastles, maxCastles),
+    minAdditionalBiomes: Math.min(minBiomes, maxBiomes),
+    maxAdditionalBiomes: Math.max(minBiomes, maxBiomes),
+  };
+}
+
+function clampInt(value, low, high, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(low, Math.min(high, Math.round(n)));
 }

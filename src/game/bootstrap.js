@@ -11,9 +11,10 @@
 //     init_snapshot.
 
 import {
-  createWorld, getComponent, forEachEntityWith,
+  createWorld, getComponent, hasComponent, forEachEntityWith,
   applyChangeOps, addComponent, setChangeRecording,
 } from './ecs/world.js';
+import { playerColorCss } from './render/playerColors.js';
 import { createRegistry, getTerrain } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
 import { createAssetLoader } from './modules/assetLoader.js';
@@ -29,7 +30,6 @@ import { installInfoOverlay } from './ui/infoOverlay.js';
 import { showOkay, showYesNo } from './ui/dialogs.js';
 import { findPath, estimateTurnsForPath, invalidateTileIndex } from './map/pathfinding.js';
 import { collectTraversalModes, resolveTerrainCost, listPassableModes } from './ecs/traversal.js';
-import { generateMap } from './map/mapgen.js';
 import { inflateFog } from './map/fog.js';
 import { hashWorld, MESSAGE_KINDS } from './protocol.js';
 
@@ -42,6 +42,8 @@ export function startGameSession({
   net,                  // { broadcast(msg), sendTo(peerId, msg), sendAction(action) }
   loadFromSnapshot,     // host-only: an optional persistence-loaded snapshot to resume
   mapSize,              // host-only fresh-game: { width, height }; ignored when loading a save
+  biomeSettings,        // host-only fresh-game: { minCastles, maxCastles, minAdditionalBiomes, maxAdditionalBiomes }
+  terrainThresholds,    // host-only fresh-game: { seaThreshold, mountainThreshold } in [0, 1]
   onLeave,
 }) {
   const assets = createAssetLoader();
@@ -60,6 +62,8 @@ export function startGameSession({
     gameRoom = new GameRoom({
       assets,
       mapSize,
+      biomeSettings,
+      terrainThresholds,
       broadcast: (message) => net.broadcast?.(message),
       sendTo: (peerId, message) => net.sendTo?.(peerId, message),
       log: (...args) => console.log('[gameRoom]', ...args),
@@ -162,6 +166,18 @@ export function startGameSession({
           + escapeHtml(actionType.label ?? '')
           + '</span>'
         : '';
+      // Conquest flag — shown for any Conquerable entity on the hex. The
+      // owner's name comes through with the player's tint; unowned states
+      // are still surfaced (grey flag + "Unclaimed") so the player can tell
+      // a structure is takeable before walking up to it.
+      const conquest = findConquerableInfoAt(viewerWorld(), hex.q, hex.r);
+      const conquestLabel = conquest
+        ? ' <span style="opacity:0.7">·</span> <span style="color:'
+          + conquest.color + '">⚑</span> '
+          + (conquest.ownerName
+              ? 'Owned by ' + escapeHtml(conquest.ownerName)
+              : '<span style="opacity:0.7">Unclaimed</span>')
+        : '';
       setCanvasCursor(actionable ? 'pointer' : '');
       cursorHud.show(
         event.clientX,
@@ -169,7 +185,8 @@ export function startGameSession({
         '<span style="color:' + colour + '">' + days + ' ' + dayWord + '</span>'
           + ' <span style="opacity:0.7">·</span> '
           + totalCost + ' mp'
-          + actionLabel,
+          + actionLabel
+          + conquestLabel,
       );
     },
     onPlanPath: (hex) => {
@@ -291,19 +308,9 @@ export function startGameSession({
   // ── Message handling (client) ───────────────────────────────────────────
   function ingestInitSnapshot(snapshot) {
     if (mode === 'host') return;
-    // Regenerate tiles from the seed before applying the rest, then wipe
-    // non-tile state and replay components verbatim.
-    if (!(clientWorld.componentStores.get('Tile')?.size > 0)) {
-      const seed = snapshot.seed ?? 1337;
-      const width = snapshot.mapWidth ?? 64;
-      const height = snapshot.mapHeight ?? 64;
-      const before = performance.now();
-      generateMap(clientWorld, clientRegistry, { width, height, seed, tilePrefabId: 'base/tile' });
-      invalidateTileIndex(clientWorld);
-      console.log('[client] generated ' + width + '×' + height + ' map in ' + Math.round(performance.now() - before) + 'ms');
-    }
-
-    const tileStore = clientWorld.componentStores.get('Tile');
+    // The snapshot now carries the full tile set — biome decorators mutate
+    // terrain in ways that aren't trivially deterministic across host and
+    // client, so we just take the host's word for it.
     clientWorld.nextEntityId = Math.max(snapshot.nextEntityId, clientWorld.nextEntityId);
     clientWorld.entities = new Set(snapshot.entityIds);
     clientWorld.componentStores = new Map();
@@ -321,10 +328,7 @@ export function startGameSession({
       }
       clientWorld.componentStores.set(componentName, map);
     }
-    if (tileStore) {
-      for (const id of tileStore.keys()) clientWorld.entities.add(id);
-      clientWorld.componentStores.set('Tile', tileStore);
-    }
+    invalidateTileIndex(clientWorld);
 
     expectedSeq = (snapshot.seq ?? 0) + 1;
     pendingResync = false;
@@ -466,12 +470,61 @@ export function startGameSession({
     const heroInfo = findHeroAt(world, hex.q, hex.r);
     if (heroInfo) sections.push(buildHeroSection(heroInfo));
 
+    // Map object section — name, optional conquest info, description. Shown
+    // for any MapObject + Position entity on the hex.
+    const mapObjectInfo = findMapObjectInfoAt(world, viewerRegistry(), hex.q, hex.r);
+    if (mapObjectInfo) sections.push(buildMapObjectSection(mapObjectInfo));
+
     const terrain = lookupTerrainAt(world, viewerRegistry(), hex.q, hex.r);
     const override = lookupOverrideTerrainAt(world, viewerRegistry(), hex.q, hex.r);
     if (terrain || override) sections.push(buildTerrainSection(terrain, override));
 
     if (sections.length === 0) return plainLine('Nothing here.');
     return sections.join('<div style="height:8px"></div>');
+  }
+
+  function buildMapObjectSection({ typeName, typeDescription, conquerable, owner }) {
+    const ownerLine = conquerable
+      ? plainLine(
+          '<span style="color:' + owner.color + '">⚑</span> '
+          + (owner.name
+              ? 'Owned by <span style="color:' + owner.color + '">' + escapeHtml(owner.name) + '</span>'
+              : '<span style="opacity:0.7">Unclaimed</span>')
+        )
+      : '';
+    const description = typeDescription
+      ? '<div style="opacity:0.8; margin-top:4px">' + escapeHtml(typeDescription) + '</div>'
+      : '';
+    return sectionTitle(typeName, '#ffd964') + ownerLine + description;
+  }
+
+  function findMapObjectInfoAt(world, registry, q, r) {
+    let result = null;
+    forEachEntityWith(world, ['MapObject', 'Position'], (entityId, mapObject, position) => {
+      if (result != null) return;
+      if (position.q !== q || position.r !== r) return;
+      const type = registry.mapObjectTypes.get(mapObject.typeId);
+      const conquerable = hasComponent(world, entityId, 'Conquerable');
+      let owner = null;
+      if (conquerable) {
+        const ownership = getComponent(world, entityId, 'Ownership');
+        const ownerId = ownership?.playerId ?? null;
+        const ownerPlayer = ownerId
+          ? lastKnownPlayers.find(p => (p.playerId ?? p.id) === ownerId)
+          : null;
+        owner = {
+          name: ownerPlayer?.name ?? null,
+          color: ownerId ? playerColorCss(ownerId) : '#888',
+        };
+      }
+      result = {
+        typeName: type?.name ?? 'Object',
+        typeDescription: type?.description ?? null,
+        conquerable,
+        owner,
+      };
+    });
+    return result;
   }
 
   function buildHeroSection({ entityId, hero, ownerPlayerName, isViewerOwned }) {
@@ -535,6 +588,28 @@ export function startGameSession({
     forEachEntityWith(world, ['Actionable', 'Position'], (_entityId, actionable, position) => {
       if (result != null) return;
       if (position.q === q && position.r === r) result = actionable;
+    });
+    return result;
+  }
+
+  // Returns conquest info for any Conquerable entity on (q, r). The flag is
+  // tinted to the owner's colour; unconquered entries get a neutral grey so
+  // hovering still tells you the thing IS conquerable.
+  function findConquerableInfoAt(world, q, r) {
+    let result = null;
+    forEachEntityWith(world, ['Conquerable', 'Position'], (entityId, _c, position) => {
+      if (result != null) return;
+      if (position.q !== q || position.r !== r) return;
+      const ownership = getComponent(world, entityId, 'Ownership');
+      const ownerId = ownership?.playerId ?? null;
+      const ownerPlayer = ownerId
+        ? lastKnownPlayers.find(p => (p.playerId ?? p.id) === ownerId)
+        : null;
+      result = {
+        ownerId,
+        ownerName: ownerPlayer?.name ?? null,
+        color: ownerId ? playerColorCss(ownerId) : '#888',
+      };
     });
     return result;
   }
@@ -658,6 +733,16 @@ export function startGameSession({
       if (event.playerId !== myPlayerId) continue;
       const message = event.message ?? '';
       const title = event.objectName ?? null;
+      setTimeout(() => { showOkay(message, { title }); }, pendingDelayMs);
+    }
+    // End-of-week vanquish announcements — only popped if the local player
+    // is the one going down. Other-player vanquishes ride the delta silently;
+    // the entity destroys land in the same op buffer so heroes just vanish.
+    for (const event of events) {
+      if (event?.type !== 'player_vanquished') continue;
+      if (event.playerId !== myPlayerId) continue;
+      const title = 'Vanquished';
+      const message = 'Without a castle to anchor your domain, your heroes have scattered to the wind.';
       setTimeout(() => { showOkay(message, { title }); }, pendingDelayMs);
     }
   }

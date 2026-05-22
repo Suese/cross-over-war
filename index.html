@@ -55,16 +55,49 @@
         </div>
         <h3>Players</h3>
         <ul id="player-list"></ul>
-        <div class="row" id="host-controls">
-          <label id="map-size-row" class="map-size-row">
-            Map size
+        <div id="host-controls">
+          <label id="map-size-row" class="setting-row">
+            <span class="setting-label">Map size</span>
             <select id="map-size-select">
               <option value="64" selected>64 × 64</option>
               <option value="128">128 × 128</option>
               <option value="256">256 × 256</option>
             </select>
           </label>
-          <button id="start-btn" class="primary">Start game</button>
+          <label class="setting-row slider-row" id="min-castles-row">
+            <span class="setting-label">Minimum castles</span>
+            <input id="min-castles" type="range" min="1" max="8" step="1" value="2" />
+            <output id="min-castles-value">2</output>
+          </label>
+          <label class="setting-row slider-row" id="max-castles-row">
+            <span class="setting-label">Maximum castles</span>
+            <input id="max-castles" type="range" min="1" max="8" step="1" value="2" />
+            <output id="max-castles-value">2</output>
+          </label>
+          <label class="setting-row slider-row" id="min-biomes-row">
+            <span class="setting-label">Minimum additional biomes</span>
+            <input id="min-biomes" type="range" min="0" max="8" step="1" value="0" />
+            <output id="min-biomes-value">0</output>
+          </label>
+          <label class="setting-row slider-row" id="max-biomes-row">
+            <span class="setting-label">Maximum additional biomes</span>
+            <input id="max-biomes" type="range" min="0" max="8" step="1" value="2" />
+            <output id="max-biomes-value">2</output>
+          </label>
+          <div class="setting-row threshold-row" id="threshold-row">
+            <span class="setting-label">Sea / Land / Mountain</span>
+            <div class="threshold-slider" id="threshold-slider" data-sea="0.40" data-mountain="0.725">
+              <div class="threshold-region threshold-sea" id="threshold-region-sea"></div>
+              <div class="threshold-region threshold-land" id="threshold-region-land"></div>
+              <div class="threshold-region threshold-mountain" id="threshold-region-mountain"></div>
+              <div class="threshold-handle" id="threshold-handle-sea" data-handle="sea" title="Sea / Land threshold"></div>
+              <div class="threshold-handle" id="threshold-handle-mountain" data-handle="mountain" title="Land / Mountain threshold"></div>
+            </div>
+            <output id="threshold-value">40% · 72%</output>
+          </div>
+          <div class="row start-row">
+            <button id="start-btn" class="primary">Start game</button>
+          </div>
         </div>
         <p class="tag" id="waiting-tag">Need at least 2 players to start.</p>
       </div>

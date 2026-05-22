@@ -218,6 +218,46 @@ component plus a `Position`. The renderer iterates `MapObject + Position`
 entities, looks the type up by `typeId`, and calls `buildMesh()` to construct
 the Three.js group.
 
+### Biome decorators — `registerBiomeDecorator(registry, { id, decorate })`
+
+A biome decorator paints a region of the map. The engine places biome
+anchors (castles + the lobby's "additional biomes" setting), assigns each
+tile to its nearest anchor, then calls each anchor's registered decorator
+on the assigned hexes. Decorators mutate `Tile.terrainId` in-place and
+spawn whatever map objects / collectables they want.
+
+```js
+registerBiomeDecorator(registry, {
+  id: 'mymod/forest-biome',
+  decorate({
+    world, registry,
+    anchorEntityId, anchorQ, anchorR,
+    biomeHexes,            // [{ entityId, q, r }, …]
+    mapWidth, mapHeight, seed,
+    occupiedHexes,         // mutable Set<"q,r"> — read before placing, add after
+  }) {
+    // walk biomeHexes, set tile.terrainId, optionally spawnFromPrefab(...)
+  },
+});
+```
+
+Castles reference a decorator via the `BiomeAnchor { decoratorId }`
+component their prefab attaches. Additional biome anchors are created by
+the engine and pick a registered decorator at random. The decoration
+order is "biomes first, then the base decorator", so anything biomes
+don't claim falls through to the base.
+
+### Base decorator — `setBaseDecorator(registry, decorateFn)`
+
+Runs once over every tile no biome anchor claimed. There's exactly one
+(most recent set wins) so a late-loading module can swap it cleanly.
+
+```js
+setBaseDecorator(registry, ({ world, hexes, seed }) => {
+  // walk hexes, modulate terrainId with perlin or whatever you like
+});
+```
+
 ### World spawners — `registerWorldSpawner(registry, spawnerFn)`
 
 Called once at the start of a fresh game, after the map terrain is generated
@@ -279,12 +319,15 @@ assembled by attaching atomic components to entities — usually inside a prefab
 | `Visitable`       | `{ message }` — stepping onto this entity's hex fires `entity_visited` and shows the message. Supports `{heroName}` substitution. |
 | `ConsumedOnVisit` | Empty tag — when combined with `Visitable`, the entity is destroyed after the visit fires (one-shot pickups). |
 | `Actionable`      | `{ actionTypeId }` — references a registered action type (`base/take`, `base/visit`, …) whose `{ icon, label }` the hover layer renders next to the cursor while flipping it to a pointer. Per-entity payload is just an id. |
+| `Conquerable`     | Empty tag — visiting the entity transfers `Ownership` to the visiting player. The hover layer and info panel show a colored `⚑` flag and "Owned by [name]" in the owner's player colour. |
+| `Ownership`       | `{ playerId }` — who controls this entity. Used by heroes; also attached to Conquerable map objects after capture. |
 | `TerrainOverride` | `{ terrainId }` — per-hex swap to a different registered terrain. Pathfinder and renderer both treat the override as the effective terrain (visual + passability come from the referenced definition). |
+| `Castle`          | Empty tag — marks an entity as a castle. End-of-week defeat check counts these per player; any player with zero owned castles is vanquished and loses all their heroes. |
+| `BiomeAnchor`     | `{ decoratorId, radius }` — the entity anchors a biome. The engine assigns every tile within `radius` (and nearer to this anchor than any other) to this biome, then invokes the named decorator on that hex set. Castles all get one; the engine creates additional standalone `BiomeAnchor` entities for the "additional biomes" lobby setting. |
 | `BlocksMovement`  | Empty tag — the hex this entity is on is treated as occupied for pathfinding (heroes, big props). |
 | `Traverses<Mode>` | Empty tag (e.g. `TraversesLand`) — the mover can cross terrain that declares `PassableBy<Mode>`. |
 | `Hero`            | `{ archetypeId, name, visionRadius, modelKey }` — gameplay-side hero data.                      |
 | `Movement`        | `{ movementMax, movementLeft, plannedPath }` — turn-budget bookkeeping.                         |
-| `Ownership`       | `{ playerId }` — who controls this entity.                                                      |
 | `Tile`            | `{ q, r, terrainId }` — map tile. Don't attach manually; created by `generateMap`.              |
 | `WorldState`      | Singleton — turn order, fog, phase, seed. Owned by `gameRoom.js`.                               |
 
@@ -374,7 +417,31 @@ decoration — it renders, it shows up in the right-click info panel, but
 stepping onto its hex does nothing special. Add `BlocksMovement` if you
 want a static obstacle (boulder, ruin) heroes cannot pass through.
 
-### How to make a Terrain Override
+### How to make a structure Conquerable
+
+Attach the `Conquerable` tag (empty) to any visitable entity to make
+visiting it transfer `Ownership` to the visiting player. There's no
+separate "conquer" action — every visit is also a flag-plant. The first
+player to step on the hex captures the structure; later visits by an
+enemy hero re-capture it for them.
+
+```js
+addComponent(world, poiId, 'Visitable', { message: 'You raise your banner here.' });
+addComponent(world, poiId, 'Actionable', { actionTypeId: 'base/visit' });
+addComponent(world, poiId, 'Conquerable', {});
+```
+
+The hover HUD and right-click info panel both gain a `⚑ Owned by [name]`
+line tinted to the owner's player colour. The renderer also tints any
+child mesh named `conquest-flag` (and shows its companion
+`conquest-flag-pole`) to the owner's colour, so a flag on top of the
+structure visually tracks the conquest — give your `buildMesh` a
+`Mesh` named `conquest-flag` (a plane with the right material) and one
+named `conquest-flag-pole` to opt in. Both start `visible = false`; the
+renderer flips them on once an `Ownership` component appears.
+
+A Conquerable on a `ConsumedOnVisit` entity is allowed but pointless —
+the entity gets destroyed in the same delta as the conquest.
 
 When a multi-hex structure should swap the terrain on its footprint hexes
 to something different — bramble around a hut, lava under a forge,

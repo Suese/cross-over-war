@@ -24,7 +24,8 @@ import {
 import { hexToPixel } from '../map/hex.js';
 import { buildHeroMesh, setHeroPosition } from './heroMesh.js';
 import { buildPathOverlay } from './pathOverlay.js';
-import { forEachEntityWith, getComponent } from '../ecs/world.js';
+import { playerColorHex } from './playerColors.js';
+import { forEachEntityWith, getComponent, hasComponent } from '../ecs/world.js';
 
 const HEX_SIZE = 1.0;
 const CAMERA_DOWN_ANGLE_DEGREES = 80;
@@ -151,6 +152,12 @@ export function createSceneRenderer(canvas) {
       const fogVisible = fog?.visibleKeys ?? fog?.visible;
       const fogExplored = fog?.exploredKeys ?? fog?.explored;
       mesh.visible = !fog || fogVisible?.has(objectKey) || fogExplored?.has(objectKey);
+      // Conquest flag — generic convention: if the mesh has children named
+      // 'conquest-flag' and/or 'conquest-flag-pole', the renderer tints them
+      // to the owner's colour and toggles visibility based on the entity's
+      // Ownership + Conquerable components. Mesh authors opt in just by
+      // adding those named children to their buildMesh output.
+      updateConquestFlag(mesh, world, entityId);
     });
 
     // Move missing entities' meshes into the graveyard for a short grace
@@ -256,6 +263,23 @@ export function createSceneRenderer(canvas) {
     screenToWorldGroundPoint,
     render,
   };
+}
+
+function updateConquestFlag(meshGroup, world, entityId) {
+  const flagCloth = meshGroup.getObjectByName?.('conquest-flag');
+  const flagPole = meshGroup.getObjectByName?.('conquest-flag-pole');
+  if (!flagCloth && !flagPole) return;
+  const isConquerable = hasComponent(world, entityId, 'Conquerable');
+  const ownership = getComponent(world, entityId, 'Ownership');
+  const ownerId = ownership?.playerId ?? null;
+  const visible = isConquerable && !!ownerId;
+  if (flagCloth) {
+    flagCloth.visible = visible;
+    if (visible && flagCloth.material?.color) {
+      flagCloth.material.color.setHex(playerColorHex(ownerId));
+    }
+  }
+  if (flagPole) flagPole.visible = visible;
 }
 
 function viewerFog(world, viewerPlayerId) {

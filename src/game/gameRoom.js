@@ -1,19 +1,27 @@
 // GameRoom: host-authoritative wrapper around the ECS world.
 //
 // Wire protocol (see protocol.js):
-//   • init_snapshot   — full state, sent on connect or after a resync request.
+//   • init_snapshot   — full state (including tiles), sent on connect or
+//                       after a resync request.
 //   • delta           — change ops + triggered events, after each host action.
 //   • state_hash      — FNV-1a of canonical world state, sent right after each delta.
 //   • players_changed — roster updates (join, leave, name-matched reconnect).
 //
-// Tile data is not in any of these — clients regenerate from `seed` on first
-// snapshot. The host's GameRoom mutates state through the ECS's tracked
-// helpers (see ecs/world.js), draining world.pendingChanges into deltas after
-// each handler. Persistence to localStorage runs after every delta.
+// Map generation runs in three explicit passes inside startNewGame():
+//   Pass 1 — base terrain (deep-ocean / plains / dusty-hills) from perlin
+//   Pass 2 — biome anchors: castles (one per player + neutrals up to max),
+//            plus additional biome anchors in the gaps, then per-tile
+//            assignment to nearest anchor within its radius
+//   Pass 3 — decoration: each biome's registered decorator paints its
+//            assigned hexes; the base decorator fills the gaps
+//
+// The host's GameRoom mutates state through the ECS's tracked helpers
+// (see ecs/world.js), draining world.pendingChanges into deltas after each
+// handler. Persistence to localStorage runs after every delta.
 
 import {
   createWorld, createEntity, addComponent, getComponent, hasComponent, getWorldState,
-  forEachEntityWith, setChangeRecording, consumePendingChanges,
+  forEachEntityWith, collectEntitiesWith, setChangeRecording, consumePendingChanges,
   setComponentTracked, patchComponentTracked, createTrackedEntity,
   destroyTrackedEntity,
 } from './ecs/world.js';
@@ -23,30 +31,45 @@ import {
   recomputeFogForAllPlayers, ensurePlayerFogInitialised,
   flattenFog, inflateFog,
 } from './map/fog.js';
-import { generateMap, findSpawnHex } from './map/mapgen.js';
+import { generateMap } from './map/mapgen.js';
 import { findPath, invalidateTileIndex } from './map/pathfinding.js';
 import { collectTraversalModes, resolveTerrainCost } from './ecs/traversal.js';
+import { hexKey, hexDistance, hexesInRadius, HEX_DIRECTIONS } from './map/hex.js';
 import { hashWorld, MESSAGE_KINDS } from './protocol.js';
 import { writeSave, newSaveId } from './persistence.js';
 
 const STARTING_HERO_ARCHETYPES = ['base/bob', 'base/alice', 'base/john', 'base/ringo'];
 const HEROES_PER_PLAYER = 2;
 const DEFAULT_MAP_DIMENSION = 64;
-// Minimum hex distance between two heroes belonging to the same player at
-// spawn. 1 means they can be adjacent but not stacked on the same tile.
-const SAME_PLAYER_SPAWN_SEPARATION = 1;
 const STARTING_MOVEMENT_MAX = 50;
+const DAYS_PER_WEEK = 7;
+// Castle prefab id used for player + neutral castles. For now everyone gets
+// the testing castle — the lobby will gain castle picking once we have more.
+const DEFAULT_CASTLE_PREFAB_ID = 'testing/castle';
+// Biome radius is derived from total biome count. Empirical trim — perfect
+// circular packing isn't possible on a hex grid, and we want a visible gap
+// of base-decorator territory between most biomes.
+const CASTLE_RADIUS_PACK_FACTOR = 0.7;
+const CASTLE_RADIUS_FLOOR = 5;
+const ADDITIONAL_BIOME_MIN_SCALE = 0.5;
+const ADDITIONAL_BIOME_MAX_SCALE = 2.0;
+const ADDITIONAL_BIOME_PLACEMENT_ATTEMPTS = 60;
 
-// Cross-player spawn separation scales with map size so a 64×64 map doesn't
-// inherit the 256×256 game's 40-hex gap (which would consume most of the
-// board). One-sixth of the smaller dimension keeps players reasonably far
-// apart at any size, with an absolute floor so tiny test maps still work.
-function spawnSeparationForMap(width, height) {
-  return Math.max(8, Math.floor(Math.min(width, height) / 6));
+const DEFAULT_BIOME_SETTINGS = {
+  minCastles: 2,
+  maxCastles: 2,
+  minAdditionalBiomes: 0,
+  maxAdditionalBiomes: 2,
+};
+
+function randomInt(low, high) {
+  const lo = Math.min(low, high);
+  const hi = Math.max(low, high);
+  return lo + Math.floor(Math.random() * (hi - lo + 1));
 }
 
 export class GameRoom {
-  constructor({ assets, mapSize, broadcast, sendTo, log }) {
+  constructor({ assets, mapSize, biomeSettings, terrainThresholds, broadcast, sendTo, log }) {
     this.world = createWorld();
     this.registry = createRegistry();
     this.assets = assets;
@@ -60,6 +83,11 @@ export class GameRoom {
     // size doesn't dump the user back on a 65k-tile slab.
     this.mapWidth = mapSize?.width ?? DEFAULT_MAP_DIMENSION;
     this.mapHeight = mapSize?.height ?? DEFAULT_MAP_DIMENSION;
+    this.biomeSettings = { ...DEFAULT_BIOME_SETTINGS, ...(biomeSettings ?? {}) };
+    this.terrainThresholds = {
+      seaThreshold: terrainThresholds?.seaThreshold ?? 0.40,
+      mountainThreshold: terrainThresholds?.mountainThreshold ?? 0.725,
+    };
 
     this.players = [];           // [{ playerId, name, connected: bool, originalPlayerId: <savedId|null> }]
     this.started = false;
@@ -119,56 +147,18 @@ export class GameRoom {
   startNewGame() {
     if (this.started) return;
     this.started = true;
-    const tiles = generateMap(this.world, this.registry, {
-      width: this.mapWidth,
-      height: this.mapHeight,
-      seed: this.seed,
-      tilePrefabId: 'base/tile',
-    });
-    invalidateTileIndex(this.world);
 
-    const takenSpawns = [];
-    const minSeparation = spawnSeparationForMap(this.mapWidth, this.mapHeight);
-    const ringRadius = Math.max(2, Math.min(this.mapWidth, this.mapHeight) / 2 - Math.max(4, Math.floor(Math.min(this.mapWidth, this.mapHeight) / 16)));
-    for (let playerIndex = 0; playerIndex < this.players.length; playerIndex++) {
-      const player = this.players[playerIndex];
-      const angle = (playerIndex / this.players.length) * Math.PI * 2;
-      const preferred = {
-        q: Math.round(Math.cos(angle) * ringRadius),
-        r: Math.round(Math.sin(angle) * ringRadius),
-      };
-      // Primary spawn — far from every other player's heroes.
-      const primarySpawn = findSpawnHex(this.world, this.registry, tiles, preferred, minSeparation, takenSpawns);
-      if (!primarySpawn) { this.log('no spawn found for player ' + player.playerId); continue; }
-      takenSpawns.push(primarySpawn);
-      this._spawnPlayerHero(player.playerId, playerIndex, 0, primarySpawn);
+    // PASS 1 — base terrain (deep-ocean / plains / dusty-hills) from perlin
+    const tiles = this._passOneTerrain();
 
-      // Secondary heroes — adjacent to the primary spawn but at least one
-      // hex away from every already-placed hero so they don't stack. They
-      // inherit the primary's cross-player separation through the takenSpawns
-      // chain — i.e. each new hero must stay at least 1 hex from all the
-      // others, regardless of which player owns them.
-      for (let extraHeroIndex = 1; extraHeroIndex < HEROES_PER_PLAYER; extraHeroIndex++) {
-        const extraSpawn = findSpawnHex(this.world, this.registry, tiles, primarySpawn, SAME_PLAYER_SPAWN_SEPARATION, takenSpawns);
-        if (!extraSpawn) { this.log('no extra spawn for player ' + player.playerId); break; }
-        takenSpawns.push(extraSpawn);
-        this._spawnPlayerHero(player.playerId, playerIndex, extraHeroIndex, extraSpawn);
-      }
-    }
+    // PASS 2 — castles + additional biome anchors + tile→anchor assignment
+    const biomeContext = this._passTwoBiomes(tiles);
 
-    // Modules scatter their world objects (collectables, decorations, …)
-    // here, after heroes are placed so spawners can avoid hero tiles.
-    const occupiedHexes = new Set(takenSpawns.map(s => s.q + ',' + s.r));
-    for (const spawnerFn of this.registry.worldSpawners ?? []) {
-      spawnerFn({
-        world: this.world,
-        registry: this.registry,
-        mapWidth: this.mapWidth,
-        mapHeight: this.mapHeight,
-        seed: this.seed,
-        occupiedHexes,
-      });
-    }
+    // Heroes spawn between passes so the decorator can avoid hero hexes.
+    this._spawnHeroesAtCastles(biomeContext.ownedCastles);
+
+    // PASS 3 — decorators (biome + base + remaining world spawners)
+    this._passThreeDecorate(biomeContext);
 
     const stateEntityId = getWorldState(this.world);
     patchComponentTracked(this.world, stateEntityId, 'WorldState', ['playerOrder'],
@@ -180,11 +170,314 @@ export class GameRoom {
     for (const player of this.players) ensurePlayerFogInitialised(this.world, player.playerId);
     recomputeFogForAllPlayers(this.world, this.registry);
 
-    // The startup mutations form the first delta — but client doesn't have
-    // an initial state to apply them to, so we drain & discard. Instead we
-    // ship a full init_snapshot once they connect.
+    // Setup mutations are drained — clients pull the initial state from
+    // init_snapshot, not deltas.
     consumePendingChanges(this.world);
     this._persistToLocalStorage();
+  }
+
+  // ── Pass 1 ──────────────────────────────────────────────────────────────
+  _passOneTerrain() {
+    const tiles = generateMap(this.world, this.registry, {
+      width: this.mapWidth,
+      height: this.mapHeight,
+      seed: this.seed,
+      tilePrefabId: 'base/tile',
+      seaThreshold: this.terrainThresholds.seaThreshold,
+      mountainThreshold: this.terrainThresholds.mountainThreshold,
+    });
+    invalidateTileIndex(this.world);
+    return tiles;
+  }
+
+  // ── Pass 2 ──────────────────────────────────────────────────────────────
+  // Place every biome anchor (player castles, neutral castles, additional
+  // anchors), then assign each tile to the nearest anchor whose radius
+  // covers it. Tiles outside all radii go to the base decorator.
+  _passTwoBiomes(tiles) {
+    const numPlayers = this.players.length;
+    const settings = this.biomeSettings;
+    // Min castles can't drop below player count — every player gets one.
+    const minCastles = Math.max(numPlayers, settings.minCastles);
+    const maxCastles = Math.max(minCastles, settings.maxCastles);
+    const totalCastles = randomInt(minCastles, maxCastles);
+    const minAdditional = Math.max(0, settings.minAdditionalBiomes);
+    const maxAdditional = Math.max(minAdditional, settings.maxAdditionalBiomes);
+    const numAdditional = randomInt(minAdditional, maxAdditional);
+    const biomeCount = Math.max(1, totalCastles + numAdditional);
+
+    // Castle biome radius — derived from map area divided by total biome
+    // count. We trim by the pack factor so neighbouring biomes don't fight
+    // for territory and the base decorator gets visible gaps to fill.
+    const mapArea = this.mapWidth * this.mapHeight;
+    const castleRadius = Math.max(
+      CASTLE_RADIUS_FLOOR,
+      Math.floor(Math.sqrt(mapArea / Math.PI / biomeCount) * CASTLE_RADIUS_PACK_FACTOR),
+    );
+    const castleSeparation = Math.max(castleRadius * 2, 6);
+
+    const tilesByKey = new Map();
+    for (const t of tiles) tilesByKey.set(hexKey(t.q, t.r), t);
+    const isWalkableLand = (q, r) => {
+      const tile = tilesByKey.get(hexKey(q, r));
+      if (!tile) return false;
+      const terrain = getTerrain(this.registry, tile.terrainId);
+      return resolveTerrainCost(terrain, ['Land']) != null;
+    };
+
+    // ── Owned castles ────────────────────────────────────────────────────
+    const placedCastles = [];
+    const ownedCastles = [];
+    const ringRadius = Math.max(2, Math.min(this.mapWidth, this.mapHeight) / 2 - Math.max(4, castleRadius));
+    for (let i = 0; i < numPlayers; i++) {
+      const angle = (i / numPlayers) * Math.PI * 2;
+      const preferred = {
+        q: Math.round(Math.cos(angle) * ringRadius),
+        r: Math.round(Math.sin(angle) * ringRadius),
+      };
+      const spawn = this._findCastleSpawn(tiles, isWalkableLand, preferred, castleSeparation, placedCastles);
+      if (!spawn) { this.log('no castle spawn for player ' + this.players[i].playerId); continue; }
+      const castleEntityId = spawnFromPrefab(this.registry, DEFAULT_CASTLE_PREFAB_ID, this.world, {
+        q: spawn.q, r: spawn.r, playerId: this.players[i].playerId,
+      });
+      this._stampBiomeRadius(castleEntityId, castleRadius);
+      const record = {
+        entityId: castleEntityId, q: spawn.q, r: spawn.r,
+        radius: castleRadius, playerId: this.players[i].playerId, playerIndex: i,
+      };
+      placedCastles.push(record);
+      ownedCastles.push(record);
+    }
+
+    // ── Neutral castles (any beyond numPlayers) ─────────────────────────
+    for (let i = 0; i < totalCastles - numPlayers; i++) {
+      const spawn = this._findNeutralCastleSpawn(tiles, isWalkableLand, castleSeparation, placedCastles);
+      if (!spawn) break;
+      const castleEntityId = spawnFromPrefab(this.registry, DEFAULT_CASTLE_PREFAB_ID, this.world, {
+        q: spawn.q, r: spawn.r,
+      });
+      this._stampBiomeRadius(castleEntityId, castleRadius);
+      placedCastles.push({ entityId: castleEntityId, q: spawn.q, r: spawn.r, radius: castleRadius, playerId: null });
+    }
+
+    // ── Additional biome anchors ────────────────────────────────────────
+    // Placed in tiles outside any castle's radius so they never overlap
+    // castle biomes. Each anchor gets a random radius between 0.5x and 2x
+    // the castle radius.
+    const placedAdditional = [];
+    const decoratorIds = Array.from(this.registry.biomeDecorators.keys());
+    if (decoratorIds.length > 0) {
+      for (let attempt = 0; attempt < ADDITIONAL_BIOME_PLACEMENT_ATTEMPTS && placedAdditional.length < numAdditional; attempt++) {
+        const candidate = tiles[Math.floor(Math.random() * tiles.length)];
+        if (!isWalkableLand(candidate.q, candidate.r)) continue;
+        let valid = true;
+        for (const c of placedCastles) {
+          if (hexDistance({ q: candidate.q, r: candidate.r }, { q: c.q, r: c.r }) < castleRadius + 1) {
+            valid = false; break;
+          }
+        }
+        if (!valid) continue;
+        for (const a of placedAdditional) {
+          if (hexDistance({ q: candidate.q, r: candidate.r }, { q: a.q, r: a.r }) < Math.max(a.radius, castleRadius)) {
+            valid = false; break;
+          }
+        }
+        if (!valid) continue;
+        const scale = ADDITIONAL_BIOME_MIN_SCALE + Math.random() * (ADDITIONAL_BIOME_MAX_SCALE - ADDITIONAL_BIOME_MIN_SCALE);
+        const radius = Math.max(3, Math.floor(castleRadius * scale));
+        const decoratorId = decoratorIds[Math.floor(Math.random() * decoratorIds.length)];
+        const anchorEntityId = createEntity(this.world);
+        addComponent(this.world, anchorEntityId, 'Position', { q: candidate.q, r: candidate.r });
+        addComponent(this.world, anchorEntityId, 'BiomeAnchor', { decoratorId, radius });
+        placedAdditional.push({ entityId: anchorEntityId, q: candidate.q, r: candidate.r, radius, decoratorId });
+      }
+    }
+
+    // ── Tile assignment ─────────────────────────────────────────────────
+    // Nearest anchor whose radius covers the tile wins. A castle just
+    // outside an additional biome anchor's radius won't steal tiles
+    // since the castle is too far; conversely additional biomes can't
+    // intrude on castle territory because anchors are pre-separated.
+    const allAnchors = [...placedCastles, ...placedAdditional];
+    const biomeHexesByAnchor = new Map();
+    for (const a of allAnchors) biomeHexesByAnchor.set(a.entityId, []);
+    const unassignedHexes = [];
+
+    forEachEntityWith(this.world, ['Tile'], (entityId, tile) => {
+      let nearest = null;
+      let nearestDist = Infinity;
+      for (const a of allAnchors) {
+        const d = hexDistance({ q: tile.q, r: tile.r }, { q: a.q, r: a.r });
+        if (d <= a.radius && d < nearestDist) {
+          nearest = a;
+          nearestDist = d;
+        }
+      }
+      if (nearest) {
+        biomeHexesByAnchor.get(nearest.entityId).push({ entityId, q: tile.q, r: tile.r });
+      } else {
+        unassignedHexes.push({ entityId, q: tile.q, r: tile.r });
+      }
+    });
+
+    return {
+      castles: placedCastles,
+      ownedCastles,
+      additionalBiomes: placedAdditional,
+      biomeHexesByAnchor,
+      unassignedHexes,
+      castleRadius,
+    };
+  }
+
+  _stampBiomeRadius(anchorEntityId, radius) {
+    const anchor = getComponent(this.world, anchorEntityId, 'BiomeAnchor');
+    if (anchor) anchor.radius = radius;
+  }
+
+  _findCastleSpawn(tiles, isWalkableLand, preferred, separation, placed) {
+    // Closest walkable land hex to `preferred` that's `separation` away
+    // from every already-placed castle.
+    const sorted = tiles.slice().sort((a, b) => {
+      return hexDistance({ q: a.q, r: a.r }, preferred) - hexDistance({ q: b.q, r: b.r }, preferred);
+    });
+    for (const t of sorted) {
+      if (!isWalkableLand(t.q, t.r)) continue;
+      let ok = true;
+      for (const c of placed) {
+        if (hexDistance({ q: t.q, r: t.r }, { q: c.q, r: c.r }) < separation) { ok = false; break; }
+      }
+      if (ok) return { q: t.q, r: t.r };
+    }
+    return null;
+  }
+
+  _findNeutralCastleSpawn(tiles, isWalkableLand, separation, placed) {
+    // Random walkable land hex separated from every other castle.
+    const candidates = tiles.filter(t => {
+      if (!isWalkableLand(t.q, t.r)) return false;
+      for (const c of placed) {
+        if (hexDistance({ q: t.q, r: t.r }, { q: c.q, r: c.r }) < separation) return false;
+      }
+      return true;
+    });
+    if (candidates.length === 0) return null;
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    return { q: pick.q, r: pick.r };
+  }
+
+  // ── Heroes ──────────────────────────────────────────────────────────────
+  _spawnHeroesAtCastles(ownedCastles) {
+    // Build a quick lookup of tiles and per-hex overrides so the spawn
+    // search can skip bramble walls without re-querying the world each step.
+    const tilesByKey = new Map();
+    forEachEntityWith(this.world, ['Tile'], (_id, tile) => tilesByKey.set(hexKey(tile.q, tile.r), tile));
+    const overridesByKey = new Set();
+    forEachEntityWith(this.world, ['TerrainOverride', 'Position'], (_id, _o, position) => {
+      overridesByKey.add(hexKey(position.q, position.r));
+    });
+
+    const heroTakenKeys = new Set();
+    for (const castle of ownedCastles) {
+      const spawns = this._findHeroSpawnsAroundCastle(castle, tilesByKey, overridesByKey, heroTakenKeys, HEROES_PER_PLAYER);
+      for (let i = 0; i < spawns.length; i++) {
+        this._spawnPlayerHero(castle.playerId, castle.playerIndex, i, spawns[i]);
+        heroTakenKeys.add(hexKey(spawns[i].q, spawns[i].r));
+      }
+    }
+  }
+
+  _findHeroSpawnsAroundCastle(castle, tilesByKey, overridesByKey, takenKeys, count) {
+    // Walk outward in expanding hex rings until enough valid spawn tiles
+    // are found. Skip the castle's bramble footprint (TerrainOverride
+    // hexes) and tiles already claimed by other heroes.
+    const out = [];
+    for (let radius = 1; radius <= 4 && out.length < count; radius++) {
+      const ring = hexesInRadius(castle.q, castle.r, radius).filter(h =>
+        hexDistance({ q: h.q, r: h.r }, { q: castle.q, r: castle.r }) === radius,
+      );
+      for (const hex of ring) {
+        const key = hexKey(hex.q, hex.r);
+        if (out.some(o => o.q === hex.q && o.r === hex.r)) continue;
+        if (takenKeys.has(key)) continue;
+        if (overridesByKey.has(key)) continue;
+        const tile = tilesByKey.get(key);
+        if (!tile) continue;
+        const terrain = getTerrain(this.registry, tile.terrainId);
+        if (resolveTerrainCost(terrain, ['Land']) == null) continue;
+        out.push({ q: hex.q, r: hex.r });
+        if (out.length >= count) break;
+      }
+    }
+    return out;
+  }
+
+  // ── Pass 3 ──────────────────────────────────────────────────────────────
+  _passThreeDecorate(biomeContext) {
+    const { biomeHexesByAnchor, unassignedHexes } = biomeContext;
+
+    // occupiedHexes tracks every claim already in the world before
+    // decorators run — castle anchors, bramble footprints, hero hexes. The
+    // base + biome decorators read from this and add their own claims.
+    const occupiedHexes = new Set();
+    forEachEntityWith(this.world, ['Position', 'MapObject'], (_id, _mo, position) => {
+      occupiedHexes.add(hexKey(position.q, position.r));
+    });
+    forEachEntityWith(this.world, ['Position', 'TerrainOverride'], (_id, _to, position) => {
+      occupiedHexes.add(hexKey(position.q, position.r));
+    });
+    forEachEntityWith(this.world, ['Position', 'Hero'], (_id, _h, position) => {
+      occupiedHexes.add(hexKey(position.q, position.r));
+    });
+
+    // Biome decorators — each anchor gets its assigned hexes painted by
+    // its registered decorator. Decorators mutate Tile.terrainId in-place
+    // and may spawnFromPrefab into the world.
+    forEachEntityWith(this.world, ['BiomeAnchor', 'Position'], (anchorEntityId, biomeAnchor, position) => {
+      const decorator = this.registry.biomeDecorators.get(biomeAnchor.decoratorId);
+      if (!decorator) return;
+      const biomeHexes = biomeHexesByAnchor.get(anchorEntityId) ?? [];
+      decorator.decorate({
+        world: this.world,
+        registry: this.registry,
+        anchorEntityId,
+        anchorQ: position.q,
+        anchorR: position.r,
+        biomeHexes,
+        mapWidth: this.mapWidth,
+        mapHeight: this.mapHeight,
+        seed: this.seed,
+        occupiedHexes,
+      });
+    });
+
+    // Base decorator — refines the tiles no biome claimed.
+    const baseDecorator = this.registry.baseDecorator;
+    if (baseDecorator) {
+      baseDecorator.decorate({
+        world: this.world,
+        registry: this.registry,
+        hexes: unassignedHexes,
+        mapWidth: this.mapWidth,
+        mapHeight: this.mapHeight,
+        seed: this.seed,
+      });
+    }
+
+    // Old-style world spawners — still supported for content that doesn't
+    // care about biomes. They see the post-decoration world.
+    for (const spawnerFn of this.registry.worldSpawners ?? []) {
+      spawnerFn({
+        world: this.world,
+        registry: this.registry,
+        mapWidth: this.mapWidth,
+        mapHeight: this.mapHeight,
+        seed: this.seed,
+        occupiedHexes,
+      });
+    }
+
+    invalidateTileIndex(this.world);
   }
 
   loadFromSave(savedSnapshot) {
@@ -192,27 +485,15 @@ export class GameRoom {
     this.started = true;
     this.saveId = savedSnapshot.id ?? this.saveId;
     this.seed = savedSnapshot.seed;
-    // Saved game wins over any lobby-supplied mapSize — the snapshot's
-    // entities were generated against those dimensions.
     this.mapWidth = savedSnapshot.mapWidth ?? this.mapWidth;
     this.mapHeight = savedSnapshot.mapHeight ?? this.mapHeight;
 
-    // Stop recording while we replay the snapshot's initial state.
     setChangeRecording(this.world, false);
 
-    // Regenerate tiles (host needs them locally for pathfinding/_terrainAt).
-    generateMap(this.world, this.registry, {
-      width: this.mapWidth,
-      height: this.mapHeight,
-      seed: this.seed,
-      tilePrefabId: 'base/tile',
-    });
-    invalidateTileIndex(this.world);
-
-    // Wipe non-tile state and replace it with the saved snapshot.
+    // The snapshot carries the full tile set now — biome decoration is
+    // not trivially deterministic so we just trust the saved state.
     this.world.nextEntityId = savedSnapshot.nextEntityId;
     this.world.entities = new Set(savedSnapshot.entityIds);
-    const tileStore = this.world.componentStores.get('Tile');
     this.world.componentStores = new Map();
     for (const componentName in savedSnapshot.components) {
       const map = new Map();
@@ -227,18 +508,14 @@ export class GameRoom {
       }
       this.world.componentStores.set(componentName, map);
     }
-    if (tileStore) {
-      for (const id of tileStore.keys()) this.world.entities.add(id);
-      this.world.componentStores.set('Tile', tileStore);
-    }
+    invalidateTileIndex(this.world);
 
-    // Replace lobby roster with saved players, marking everyone as not yet
-    // reconnected. addPlayer() will rebind by name as peers arrive.
     this.players = (savedSnapshot.players ?? []).map(savedPlayer => ({
       playerId: savedPlayer.playerId,
       name: savedPlayer.name,
       connected: false,
       originalPlayerId: savedPlayer.playerId,
+      vanquished: !!savedPlayer.vanquished,
     }));
 
     setChangeRecording(this.world, true);
@@ -270,9 +547,11 @@ export class GameRoom {
 
   // ── Snapshot (full init) ───────────────────────────────────────────────
   buildInitSnapshot() {
+    // Ship every component store, including Tile. Biome decoration mutates
+    // terrain in ways that aren't trivially deterministic across host and
+    // client, so the snapshot just carries the host's authoritative state.
     const componentsByName = {};
     for (const [name, store] of this.world.componentStores) {
-      if (name === 'Tile') continue;
       const flat = {};
       for (const [entityId, data] of store) {
         if (name === 'WorldState') {
@@ -283,13 +562,10 @@ export class GameRoom {
       }
       componentsByName[name] = flat;
     }
-    const tileStore = this.world.componentStores.get('Tile');
-    const tileEntityIds = tileStore ? new Set(tileStore.keys()) : new Set();
-    const nonTileEntityIds = Array.from(this.world.entities).filter(id => !tileEntityIds.has(id));
     return {
       seq: this.sequenceNumber,
       nextEntityId: this.world.nextEntityId,
-      entityIds: nonTileEntityIds,
+      entityIds: Array.from(this.world.entities),
       components: componentsByName,
       seed: this.seed,
       mapWidth: this.mapWidth,
@@ -414,6 +690,21 @@ export class GameRoom {
           message: formattedMessage,
           consumed,
         });
+        // Conquest — visiting a Conquerable entity transfers Ownership to
+        // the visiting player. Ownership is a pre-existing component (heroes
+        // use it too); reusing it for POIs keeps the design atomic. We only
+        // emit the patch when the owner actually changes — re-visiting your
+        // own POI shouldn't generate delta traffic.
+        if (hasComponent(this.world, visitableEntityId, 'Conquerable')) {
+          const currentOwnership = getComponent(this.world, visitableEntityId, 'Ownership');
+          if (currentOwnership?.playerId !== playerId) {
+            if (currentOwnership) {
+              patchComponentTracked(this.world, visitableEntityId, 'Ownership', ['playerId'], playerId);
+            } else {
+              setComponentTracked(this.world, visitableEntityId, 'Ownership', { playerId });
+            }
+          }
+        }
         if (consumed) destroyTrackedEntity(this.world, visitableEntityId);
         break;
       }
@@ -443,8 +734,10 @@ export class GameRoom {
     if (!this._isCurrentPlayer(playerId)) return;
     const stateEntityId = getWorldState(this.world);
     const worldState = getComponent(this.world, stateEntityId, 'WorldState');
+    const completedTurnNumber = worldState.turnNumber;
     const nextIndex = (worldState.currentPlayerIndex + 1) % this.players.length;
-    const nextTurnNumber = worldState.turnNumber + (nextIndex === 0 ? 1 : 0);
+    const turnRolledOver = nextIndex === 0;
+    const nextTurnNumber = worldState.turnNumber + (turnRolledOver ? 1 : 0);
 
     patchComponentTracked(this.world, stateEntityId, 'WorldState', ['currentPlayerIndex'], nextIndex);
     patchComponentTracked(this.world, stateEntityId, 'WorldState', ['turnNumber'], nextTurnNumber);
@@ -456,6 +749,41 @@ export class GameRoom {
     });
     recomputeFogForAllPlayers(this.world, this.registry);
     events.push({ type: 'turn_ended', currentPlayerIndex: nextIndex, turnNumber: nextTurnNumber });
+
+    // End of week — any player without a castle loses all their heroes.
+    if (turnRolledOver && completedTurnNumber % DAYS_PER_WEEK === 0) {
+      this._vanquishCastlelessPlayers(events);
+      recomputeFogForAllPlayers(this.world, this.registry);
+    }
+  }
+
+  // ── Defeat condition ──────────────────────────────────────────────────
+  _vanquishCastlelessPlayers(events) {
+    // Tally castle counts per player. A castle "belongs" to a player when
+    // its Ownership.playerId matches — losing it (or never owning one)
+    // means the player ends the week with 0 castles and is vanquished.
+    const castleCounts = new Map();
+    forEachEntityWith(this.world, ['Castle', 'Ownership'], (_id, _castle, ownership) => {
+      if (!ownership.playerId) return;
+      castleCounts.set(ownership.playerId, (castleCounts.get(ownership.playerId) ?? 0) + 1);
+    });
+
+    for (const player of this.players) {
+      if (player.vanquished) continue;
+      const count = castleCounts.get(player.playerId) ?? 0;
+      if (count > 0) continue;
+      player.vanquished = true;
+
+      // Collect first, then destroy — destroy can't run during iteration.
+      const heroIds = [];
+      forEachEntityWith(this.world, ['Hero', 'Ownership'], (entityId, _hero, ownership) => {
+        if (ownership.playerId === player.playerId) heroIds.push(entityId);
+      });
+      for (const id of heroIds) destroyTrackedEntity(this.world, id);
+
+      events.push({ type: 'player_vanquished', playerId: player.playerId, name: player.name });
+      this._publishPlayersChanged();
+    }
   }
 
   // ── Delta + hash broadcast ─────────────────────────────────────────────

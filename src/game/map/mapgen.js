@@ -10,18 +10,37 @@ import { createSeededNoise2D, fractalNoise2D } from './perlin.js';
 import { spawnFromPrefab } from '../ecs/registry.js';
 import { resolveTerrainCost } from '../ecs/traversal.js';
 
-// Terrain id chosen from a height sample (height in [-1, 1]).
-const DEFAULT_HEIGHT_BUCKETS = [
-  { maxHeight: -0.20, terrainId: 'water' },
-  { maxHeight:  0.45, terrainId: 'grass' },
-  { maxHeight:  1.01, terrainId: 'mountain' },
-];
+// Default sea / land / mountain thresholds in [0, 1]. The lobby slider
+// overrides these per game; the internal fractal noise produces samples in
+// [-1, 1] which we remap to [0, 1] before applying the cutoffs.
+const DEFAULT_SEA_THRESHOLD = 0.40;
+const DEFAULT_MOUNTAIN_THRESHOLD = 0.725;
 
-function pickTerrainId(heightSample, buckets) {
-  for (const bucket of buckets) {
-    if (heightSample <= bucket.maxHeight) return bucket.terrainId;
-  }
-  return buckets[buckets.length - 1].terrainId;
+// Convert seed bytes into a deterministic [0, 1) PRNG. Used to vary noise
+// parameters per seed so a "1337 map" and a "1338 map" feel structurally
+// different (one might be archipelago-y, one continental) without losing
+// reproducibility.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Derive scale / octave count / persistence (turbulence) / lacunarity from
+// the seed. Same seed → same params, every time.
+function noiseParametersFromSeed(seed) {
+  const rng = mulberry32(seed ^ 0xC0DE);
+  return {
+    scale:        0.025 + rng() * 0.07,   // [0.025, 0.095]  — controls feature size
+    octaves:      2     + Math.floor(rng() * 4),   // [2, 5]
+    persistence:  0.40  + rng() * 0.30,   // [0.40, 0.70]    — turbulence
+    lacunarity:   1.80  + rng() * 0.45,   // [1.80, 2.25]
+  };
 }
 
 export function generateMap(world, registry, options = {}) {
@@ -29,9 +48,11 @@ export function generateMap(world, registry, options = {}) {
   const height = options.height ?? 256;
   const seed = options.seed ?? 1337;
   const tilePrefabId = options.tilePrefabId ?? 'base/tile';
-  const heightBuckets = options.heightBuckets ?? DEFAULT_HEIGHT_BUCKETS;
-  const noiseScale = options.noiseScale ?? 0.05;
+  // User-supplied thresholds in [0, 1] space.
+  const seaThreshold = options.seaThreshold ?? DEFAULT_SEA_THRESHOLD;
+  const mountainThreshold = options.mountainThreshold ?? DEFAULT_MOUNTAIN_THRESHOLD;
 
+  const params = noiseParametersFromSeed(seed);
   const noise = createSeededNoise2D(seed);
   const halfWidth = Math.floor(width / 2);
   const halfHeight = Math.floor(height / 2);
@@ -42,13 +63,19 @@ export function generateMap(world, registry, options = {}) {
     const rowShift = Math.floor(r / 2);
     for (let columnIndex = 0; columnIndex < width; columnIndex++) {
       const q = columnIndex - halfWidth - rowShift;
-      const sample = fractalNoise2D(
+      const rawSample = fractalNoise2D(
         noise,
-        q * noiseScale,
-        r * noiseScale,
-        4, 0.55, 2.0,
+        q * params.scale,
+        r * params.scale,
+        params.octaves, params.persistence, params.lacunarity,
       );
-      const terrainId = pickTerrainId(sample, heightBuckets);
+      // fractalNoise2D returns roughly [-1, 1]. Remap to [0, 1] for the
+      // user-friendly threshold comparison.
+      const normalised = (rawSample + 1) * 0.5;
+      let terrainId;
+      if (normalised < seaThreshold) terrainId = 'deep-ocean';
+      else if (normalised < mountainThreshold) terrainId = 'plains';
+      else terrainId = 'dusty-hills';
       const entityId = spawnFromPrefab(registry, tilePrefabId, world, { q, r, terrainId });
       created.push({ entityId, q, r, terrainId });
     }

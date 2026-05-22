@@ -13,27 +13,11 @@ import {
   Color,
 } from 'three';
 import { hexToPixel } from '../map/hex.js';
-
-const PLAYER_PALETTE = [
-  0xff5c5c, // red
-  0x5cb6ff, // blue
-  0x5cff8b, // green
-  0xffd95c, // yellow
-  0xa56cff, // purple
-  0xff905c, // orange
-];
-
-function colourForPlayer(playerId) {
-  if (!playerId) return 0xbbbbbb;
-  // Deterministic hash: sum of char codes mod palette length.
-  let hash = 0;
-  for (let i = 0; i < playerId.length; i++) hash = (hash + playerId.charCodeAt(i)) >>> 0;
-  return PLAYER_PALETTE[hash % PLAYER_PALETTE.length];
-}
+import { playerColorHex } from './playerColors.js';
 
 export function buildHeroMesh(registry, assets, hero, ownerPlayerId) {
   const group = new Group();
-  const colour = new Color(colourForPlayer(ownerPlayerId));
+  const colour = new Color(playerColorHex(ownerPlayerId));
 
   // Cube body — elongated along +Z so a "nose" sticks out front. Once we
   // rotate the group around Y to face the direction of movement, the
