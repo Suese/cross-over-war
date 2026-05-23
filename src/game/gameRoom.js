@@ -66,6 +66,10 @@ const ADDITIONAL_BIOME_PLACEMENT_ATTEMPTS = 60;
 const BIOME_WALL_MIN = 0.5;
 const BIOME_WALL_MAX = 0.9;
 const BIOME_WALL_NOISE_SCALE = 0.22;
+// Total thickness of the mountain band across the biome boundary, split
+// evenly between hexes inside the biome and hexes outside it. 2 = 1 hex in
+// + 1 hex out; 4 = 2 + 2. Odd values lean one ring outward.
+const BIOME_WALL_THICKNESS = 2;
 
 // Road-carver cost constants. The inter-biome carver picks the lowest-cost
 // path through workable terrain by default; the water cost lets it route
@@ -455,45 +459,66 @@ export class GameRoom {
   }
 
   // ── Pass 2.5 ────────────────────────────────────────────────────────────
-  // Wall the biomes off with mountains. Walks every unassigned hex; any hex
-  // that neighbours a biome-assigned tile rolls against a fractal-noise
-  // field. Tiles whose normalised noise sample is below the per-map closure
-  // density become 'mountain'. The result is a partially-broken ring of
-  // mountains separating the biome interior from the wild map — players
-  // still find passes through but the biome reads as a closed pocket.
+  // Wall the biomes off with mountains, threading the band across the
+  // boundary itself. Hexes are wall candidates when they sit within
+  // `inwardRings` of a non-biome hex (inner rim of the biome) or within
+  // `outwardRings` of a biome hex (outer rim outside the biome). Each
+  // candidate rolls a fractal-noise sample; samples below the per-map
+  // closure density flip the tile to 'mountain'. The result is a
+  // partially-broken ring straddling the biome edge — players still find
+  // passes through, and the kingdom reads as a closed pocket.
   //
   // Density is rolled randomly per map in [BIOME_WALL_MIN, BIOME_WALL_MAX].
   // Ocean tiles are exempt — the wall is a land-only feature.
   _passBiomeWalls(biomeContext) {
     const { biomeHexesByAnchor, unassignedHexes } = biomeContext;
-    if (!unassignedHexes || unassignedHexes.length === 0) return;
+    if (!biomeHexesByAnchor || biomeHexesByAnchor.size === 0) return;
 
     const density = BIOME_WALL_MIN + Math.random() * (BIOME_WALL_MAX - BIOME_WALL_MIN);
     const noise = createSeededNoise2D(this.seed + 8849);
+    // Split the band evenly across the boundary. Odd thickness leans outward
+    // (more wild-side mountains than biome-interior mountains), which keeps
+    // the biome decorator's own art mostly intact.
+    const inwardRings = Math.floor(BIOME_WALL_THICKNESS / 2);
+    const outwardRings = Math.ceil(BIOME_WALL_THICKNESS / 2);
 
     // Fast lookup of every hex that belongs to any biome.
     const biomeHexKeys = new Set();
+    const allBiomeHexes = [];
     for (const hexes of biomeHexesByAnchor.values()) {
-      for (const hex of hexes) biomeHexKeys.add(hexKey(hex.q, hex.r));
+      for (const hex of hexes) {
+        biomeHexKeys.add(hexKey(hex.q, hex.r));
+        allBiomeHexes.push(hex);
+      }
     }
 
-    for (const hex of unassignedHexes) {
-      // Only hexes that touch a biome are candidates for the wall.
-      let touchesBiome = false;
-      for (const direction of HEX_DIRECTIONS) {
-        if (biomeHexKeys.has(hexKey(hex.q + direction.q, hex.r + direction.r))) {
-          touchesBiome = true;
+    const applyWall = (hex, ringRadius, nearbyMustBeBiome) => {
+      // ringRadius==0 short-circuit: a hex itself counts as "near boundary"
+      // only when it's adjacent (ringRadius >= 1). Zero means no inward (or
+      // outward) band on this side at all.
+      if (ringRadius <= 0) return;
+      let nearBoundary = false;
+      for (const ringHex of hexesInRadius(hex.q, hex.r, ringRadius)) {
+        const inBiome = biomeHexKeys.has(hexKey(ringHex.q, ringHex.r));
+        if (inBiome === nearbyMustBeBiome) {
+          nearBoundary = true;
           break;
         }
       }
-      if (!touchesBiome) continue;
+      if (!nearBoundary) return;
       const tile = getComponent(this.world, hex.entityId, 'Tile');
-      if (!tile) continue;
-      // Walls land on dry hexes only — leave the sea alone.
-      if (tile.terrainId !== 'plains' && tile.terrainId !== 'rocky-hills') continue;
+      if (!tile) return;
+      if (tile.terrainId !== 'plains' && tile.terrainId !== 'rocky-hills') return;
       const sample = fractalNoise2D(noise, hex.q * BIOME_WALL_NOISE_SCALE, hex.r * BIOME_WALL_NOISE_SCALE, 3, 0.55, 2.0);
       const normalised = (sample + 1) * 0.5;
       if (normalised < density) tile.terrainId = 'mountain';
+    };
+
+    // Inner band — biome hexes whose neighbourhood includes a non-biome tile.
+    for (const hex of allBiomeHexes) applyWall(hex, inwardRings, false);
+    // Outer band — unassigned hexes whose neighbourhood includes a biome tile.
+    if (unassignedHexes) {
+      for (const hex of unassignedHexes) applyWall(hex, outwardRings, true);
     }
   }
 
