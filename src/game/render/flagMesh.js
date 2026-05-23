@@ -60,6 +60,12 @@ export const DEFAULT_FLAG_CONFIG = Object.freeze({
   emblemPosition: 'center',
 });
 
+// Tilt the whole flag mesh back ~15° so the cloth doesn't sit dead-vertical
+// — reads more like a real wind-caught banner. The cloth is on the +X side
+// of the pole, so a negative rotation around Z leans the top of the pole
+// away from the cloth (i.e. the flag tips "back" relative to its hoist).
+const FLAG_BACK_TILT_RADIANS = -Math.PI * 15 / 180;
+
 // Build a mesh group containing the pole and the cloth. The cloth's
 // material owns a CanvasTexture that's regenerated whenever the flag
 // config changes — call `applyFlagConfig(group, config, registry)` to
@@ -67,6 +73,7 @@ export const DEFAULT_FLAG_CONFIG = Object.freeze({
 export function buildFlagMesh(flagConfig, registry) {
   const group = new Group();
   group.name = 'mounted-flag';
+  group.rotation.z = FLAG_BACK_TILT_RADIANS;
 
   const poleMaterial = new MeshStandardMaterial({ color: 0x2a2520, roughness: 0.6 });
   const pole = new Mesh(new CylinderGeometry(POLE_RADIUS, POLE_RADIUS, POLE_HEIGHT, 6), poleMaterial);

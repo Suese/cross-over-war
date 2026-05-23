@@ -235,7 +235,7 @@ export class GameRoom {
 
     // If the very first player happens to be a CPU, end their turn(s) for
     // them — this re-uses the same chain that runs after every action.
-    this._tickCpuTurnsIfActive();
+    this._scheduleCpuTick();
   }
 
   // ── Pass 1 ──────────────────────────────────────────────────────────────
@@ -787,6 +787,9 @@ export class GameRoom {
       playerId: savedPlayer.playerId,
       name: savedPlayer.name,
       connected: false,
+      profile: savedPlayer.profile ?? null,
+      kingdomId: savedPlayer.kingdomId ?? null,
+      isComputer: !!savedPlayer.isComputer,
       originalPlayerId: savedPlayer.playerId,
       vanquished: !!savedPlayer.vanquished,
     }));
@@ -875,15 +878,31 @@ export class GameRoom {
     }
     this._publishDelta(events);
     // CPU stub — if a turn change put a CPU into the active slot, end their
-    // turn for them immediately so the game keeps progressing. This loops
-    // synchronously through consecutive CPU slots; players will see one
-    // re-render after all the CPUs in the chain have ended their turns.
-    this._tickCpuTurnsIfActive();
+    // turn for them. Scheduled as a deferred tick so it runs *after* the
+    // current call stack (including the broadcast / rerender chain) fully
+    // unwinds — avoids any reentry pitfalls inside the synchronous broadcast
+    // path and makes the CPU tick robust to throws further downstream.
+    this._scheduleCpuTick();
+  }
+
+  _scheduleCpuTick() {
+    if (this._cpuTickScheduled) return;
+    this._cpuTickScheduled = true;
+    setTimeout(() => {
+      this._cpuTickScheduled = false;
+      try {
+        this._tickCpuTurnsIfActive();
+      } catch (err) {
+        this.log('cpu tick threw:', err?.message ?? err);
+        console.error('[gameRoom] cpu tick threw', err);
+      }
+    }, 0);
   }
 
   // If the current active player is a CPU, dispatch end_turn on their behalf.
-  // The recursion bottoms out when the next current player is a human (or
-  // the game enters a vanquished/ended state).
+  // Loops through consecutive CPU slots until a human is current (or the
+  // iteration cap trips). Each end_turn publishes its own delta, so the
+  // viewer's HUD updates between CPUs.
   _tickCpuTurnsIfActive(maxIterations = 32) {
     for (let i = 0; i < maxIterations; i++) {
       const stateEntityId = getWorldState(this.world);
