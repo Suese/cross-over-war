@@ -47,6 +47,16 @@ export function spawnFromPrefab(registry, prefabId, world, params) {
   return factory(world, params ?? {});
 }
 
+// Register a hero archetype. Definition shape:
+//   id        : string  unique archetype id (namespace by module)
+//   name      : string  shown in the lobby hero picker + cursor HUD
+//   prefabId  : string  prefab to spawn (usually 'base/hero')
+//   defaults  : object  spread into the prefab's spawn params. `modelKey`,
+//                       if set, overrides everything else and gives this
+//                       archetype its own bespoke mesh. When unset, the
+//                       spawn falls back to the kingdom's
+//                       `defaultHeroModelKey`, and finally the prefab's
+//                       baked-in `base/hero.glb`.
 export function registerHero(registry, definition) {
   if (!definition.id) throw new Error('registerHero: id required');
   if (registry.heroes.has(definition.id)) {
@@ -179,6 +189,12 @@ export function listEmblems(registry) {
 //   heroIds         : string[] hero archetype ids in spawn order. The first
 //                             entry seeds player 0's first hero, etc.
 //                             Falls back to base/* archetypes when missing.
+//   defaultHeroModelKey: string (optional) — kingdom-level hero GLB used for
+//                             every archetype that doesn't supply its own
+//                             `defaults.modelKey`. Resolution order at spawn
+//                             time is: archetype modelKey → kingdom
+//                             defaultHeroModelKey → prefab fallback
+//                             ('base/hero.glb').
 //   bonus           : { kind, value, ... } — applied to spawned heroes /
 //                             gameplay. Shape interpreted by gameRoom.
 export function registerKingdom(registry, definition) {

@@ -835,6 +835,12 @@ export class GameRoom {
       movementMax,
       movementLeft: movementMax,
     };
+    // Hero model resolution: archetype's own modelKey wins; otherwise fall
+    // back to the kingdom's defaultHeroModelKey; otherwise the prefab's
+    // baked-in 'base/hero.glb' takes over inside spawnFromPrefab.
+    if (heroParams.modelKey == null && kingdom?.defaultHeroModelKey) {
+      heroParams.modelKey = kingdom.defaultHeroModelKey;
+    }
     return spawnFromPrefab(this.registry, archetype.prefabId, this.world, heroParams);
   }
 

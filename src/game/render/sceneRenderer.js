@@ -248,14 +248,22 @@ export function createSceneRenderer(canvas) {
       } else {
         setHeroPosition(mesh, position.q, position.r, HEX_SIZE);
         mesh.position.y = terrainHeightAt(world, registry, position.q, position.r);
-        // Clear any leftover yaw from a previous animation.
-        mesh.quaternion.identity();
+        // Leave mesh.quaternion alone — heroes keep the facing direction
+        // from the end of their last animation so they don't snap back to
+        // a default heading the moment they stop moving.
       }
 
       const displayKey = displayQ + ',' + displayR;
       const heroVisible = !fog || fogVisibleSet?.has(displayKey) || ownerPlayerId === viewerPlayerId;
       mesh.visible = heroVisible;
       mountOrUpdateFlag(mesh, world, registry, entityId);
+      // Counter-rotate the flag attachment so the flag stays readable in
+      // world space regardless of which way the hero is facing. The
+      // flag-attach is a child of the hero mesh, so it inherits the hero's
+      // yaw — applying the inverse here cancels it out while leaving the
+      // flag's own back-tilt (set on the mounted flag) intact.
+      const flagAttach = mesh.getObjectByName?.('flag-attach');
+      if (flagAttach) flagAttach.quaternion.copy(mesh.quaternion).invert();
     });
 
     forEachEntityWith(world, ['MapObject', 'Position'], (entityId, mapObject, position) => {

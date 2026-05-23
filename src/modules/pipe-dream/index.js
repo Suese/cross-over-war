@@ -43,7 +43,7 @@ const ACCENT = 0xff4a3a; // overall-red
 const HERO_IDS = [
   'pipe-dream/plumber-joe',
   'pipe-dream/plumber-lou',
-  'pipe-dream/princess-lily',
+  'pipe-dream/princess-cherry',
   'pipe-dream/mushroom-knight',
 ];
 
@@ -231,10 +231,23 @@ export default {
     });
 
     // ── Heroes ──────────────────────────────────────────────────────────
+    // Plumber Lou and Mushroom Knight have no archetype `modelKey`; they
+    // pick up the kingdom's `defaultHeroModelKey` (Joe). Princess Cherry
+    // overrides with her own model. Plumber Joe also falls through to the
+    // kingdom default — no duplication needed.
     registerHero(registry, { id: HERO_IDS[0], name: 'Plumber Joe',     prefabId: 'base/hero', defaults: { archetypeId: HERO_IDS[0], visionRadius: 4, movementMax: 20 } });
     registerHero(registry, { id: HERO_IDS[1], name: 'Plumber Lou',     prefabId: 'base/hero', defaults: { archetypeId: HERO_IDS[1], visionRadius: 4, movementMax: 20 } });
-    registerHero(registry, { id: HERO_IDS[2], name: 'Princess Lily',   prefabId: 'base/hero', defaults: { archetypeId: HERO_IDS[2], visionRadius: 4, movementMax: 20 } });
+    registerHero(registry, { id: HERO_IDS[2], name: 'Princess Cherry', prefabId: 'base/hero', defaults: { archetypeId: HERO_IDS[2], visionRadius: 4, movementMax: 20, modelKey: 'pipe-dream/hero-cherry.glb' } });
     registerHero(registry, { id: HERO_IDS[3], name: 'Mushroom Knight', prefabId: 'base/hero', defaults: { archetypeId: HERO_IDS[3], visionRadius: 4, movementMax: 20 } });
+
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'pipe-dream/hero-joe.glb', declaredFor: 'hero:' + HERO_IDS[0],
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'pipe-dream/hero-cherry.glb', declaredFor: 'hero:' + HERO_IDS[2],
+    });
 
     // ── Kingdom registration ────────────────────────────────────────────
     registerKingdom(registry, {
@@ -246,6 +259,7 @@ export default {
       primaryBiomeId: PRIMARY_BIOME_ID,
       secondaryBiomeId: SECONDARY_BIOME_ID,
       heroIds: HERO_IDS,
+      defaultHeroModelKey: 'pipe-dream/hero-joe.glb',
       bonus: { movementMaxBonus: 30 },
     });
   },
