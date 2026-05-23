@@ -7,6 +7,7 @@
 //     the cursor; the cursor can drag to inspect adjacent tiles. Release
 //     hides the panel. Escape clears the current plan.
 //   • Mouse wheel zooms; WASD / arrow keys pan the camera.
+//   • Middle-drag pans; Shift + middle-drag tilts the camera (25°–90°).
 //   • Hover invokes `onHoverHex` with the (q, r) under the cursor and the
 //     currently-planned path so the cursor HUD can show travel days.
 
@@ -17,10 +18,15 @@ export function installPointerInput(renderer, hooks) {
   let lastPlannedDestinationKey = null;
 
   let dragging = false;
+  let dragMode = 'pan'; // 'pan' | 'tilt'
   let dragStartX = 0;
   let dragStartY = 0;
   let dragStartTargetX = 0;
   let dragStartTargetZ = 0;
+  let dragStartTiltDegrees = 0;
+
+  // Pixels of vertical drag needed to traverse the full 25°–90° tilt range.
+  const TILT_DRAG_PIXELS_PER_FULL_RANGE = 400;
 
   // Right-click-and-hold info-panel state. While `infoHeld` is true the
   // hover hooks are skipped so the cursor HUD doesn't fight the info panel,
@@ -36,6 +42,14 @@ export function installPointerInput(renderer, hooks) {
 
   canvas.addEventListener('pointermove', (event) => {
     if (dragging) {
+      if (dragMode === 'tilt') {
+        // Drag up → steeper (more top-down), drag down → shallower. Range
+        // is clamped inside the renderer to 25°–90°.
+        const deltaY = event.clientY - dragStartY;
+        const degreesPerPixel = 65 / TILT_DRAG_PIXELS_PER_FULL_RANGE;
+        renderer.setCameraTiltDegrees(dragStartTiltDegrees - deltaY * degreesPerPixel);
+        return;
+      }
       const deltaX = event.clientX - dragStartX;
       const deltaY = event.clientY - dragStartY;
       // Approximate world units per pixel using current distance.
@@ -76,10 +90,12 @@ export function installPointerInput(renderer, hooks) {
     }
     if (event.button === 1) {
       dragging = true;
+      dragMode = event.shiftKey ? 'tilt' : 'pan';
       dragStartX = event.clientX;
       dragStartY = event.clientY;
       dragStartTargetX = renderer.cameraTarget.x;
       dragStartTargetZ = renderer.cameraTarget.z;
+      dragStartTiltDegrees = renderer.getCameraTiltDegrees();
       canvas.setPointerCapture(event.pointerId);
       return;
     }

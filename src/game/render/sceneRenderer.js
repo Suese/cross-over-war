@@ -32,7 +32,9 @@ import { getEffectiveTerrainAt } from '../map/pathfinding.js';
 import { buildFlagMesh, applyFlagConfig, disposeFlagMesh } from './flagMesh.js';
 
 const HEX_SIZE = 1.0;
-const CAMERA_DOWN_ANGLE_DEGREES = 80;
+const DEFAULT_CAMERA_DOWN_ANGLE_DEGREES = 80;
+const MIN_CAMERA_DOWN_ANGLE_DEGREES = 25;
+const MAX_CAMERA_DOWN_ANGLE_DEGREES = 90;
 const DEFAULT_CAMERA_DISTANCE = 38;
 const MIN_CAMERA_DISTANCE = 8;
 const MAX_CAMERA_DISTANCE = 300;
@@ -124,9 +126,10 @@ export function createSceneRenderer(canvas) {
   const camera = new PerspectiveCamera(35, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
   const cameraTarget = new Vector3(0, 0, 0);
   let cameraDistance = DEFAULT_CAMERA_DISTANCE;
+  let cameraDownAngleDegrees = DEFAULT_CAMERA_DOWN_ANGLE_DEGREES;
 
   function applyCameraPlacement() {
-    const angle = (CAMERA_DOWN_ANGLE_DEGREES * Math.PI) / 180;
+    const angle = (cameraDownAngleDegrees * Math.PI) / 180;
     const horizontalOffset = Math.cos(angle) * cameraDistance;
     const verticalOffset = Math.sin(angle) * cameraDistance;
     camera.position.set(
@@ -377,6 +380,14 @@ export function createSceneRenderer(canvas) {
     cameraDistance = Math.max(MIN_CAMERA_DISTANCE, Math.min(MAX_CAMERA_DISTANCE, cameraDistance * factor));
     applyCameraPlacement();
   }
+  function setCameraTiltDegrees(degrees) {
+    cameraDownAngleDegrees = Math.max(
+      MIN_CAMERA_DOWN_ANGLE_DEGREES,
+      Math.min(MAX_CAMERA_DOWN_ANGLE_DEGREES, degrees),
+    );
+    applyCameraPlacement();
+  }
+  function getCameraTiltDegrees() { return cameraDownAngleDegrees; }
   function centerOnHex(q, r) {
     const point = hexToPixel(q, r, HEX_SIZE);
     cameraTarget.set(point.x, 0, point.z);
@@ -427,6 +438,8 @@ export function createSceneRenderer(canvas) {
     panCamera,
     setCameraTargetXZ,
     zoomCamera,
+    setCameraTiltDegrees,
+    getCameraTiltDegrees,
     centerOnHex,
     screenToWorldGroundPoint,
     setFlagConfigForPlayer,
