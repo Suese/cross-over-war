@@ -39,59 +39,65 @@
               <button id="profile-delete" class="small danger" title="Delete the profile matching the current name">Delete</button>
             </div>
 
-            <div class="flag-preview-row">
-              <canvas id="flag-preview-canvas" width="200" height="128"></canvas>
-              <div class="flag-controls">
+            <div class="tab-strip" role="tablist">
+              <button type="button" class="tab-btn active" data-tab="flag" role="tab">Flag</button>
+              <button type="button" class="tab-btn" data-tab="kingdom" role="tab">Kingdom</button>
+            </div>
+
+            <div class="tab-pane active" data-tab="flag" role="tabpanel">
+              <div class="flag-preview-row">
+                <canvas id="flag-preview-canvas" width="200" height="128"></canvas>
+                <div class="flag-controls">
+                  <label>
+                    Stripe direction
+                    <select id="flag-stripe">
+                      <option value="horizontal">Horizontal</option>
+                      <option value="vertical">Vertical</option>
+                      <option value="diagonal">Diagonal</option>
+                    </select>
+                  </label>
+                  <label>
+                    Emblem
+                    <select id="flag-emblem"></select>
+                  </label>
+                  <label>
+                    Emblem position
+                    <select id="flag-emblem-position">
+                      <option value="center">Centre</option>
+                      <option value="top-left">Top-left</option>
+                      <option value="top-right">Top-right</option>
+                      <option value="bottom-left">Bottom-left</option>
+                      <option value="bottom-right">Bottom-right</option>
+                    </select>
+                  </label>
+                  <label class="slider-label">
+                    Emblem size <output id="flag-emblem-size-value">60%</output>
+                    <input id="flag-emblem-size" type="range" min="15" max="100" step="5" value="60" />
+                  </label>
+                </div>
+              </div>
+
+              <div class="colour-grid">
                 <label>
-                  Stripe direction
-                  <select id="flag-stripe">
-                    <option value="horizontal">Horizontal</option>
-                    <option value="vertical">Vertical</option>
-                    <option value="diagonal">Diagonal</option>
-                  </select>
+                  Colour 1
+                  <input id="flag-colour-1" type="color" value="#c81428" />
                 </label>
                 <label>
-                  Emblem
-                  <select id="flag-emblem"></select>
+                  Colour 2
+                  <input id="flag-colour-2" type="color" value="#ffffff" />
                 </label>
                 <label>
-                  Emblem position
-                  <select id="flag-emblem-position">
-                    <option value="center">Centre</option>
-                    <option value="top-left">Top-left</option>
-                    <option value="top-right">Top-right</option>
-                    <option value="bottom-left">Bottom-left</option>
-                    <option value="bottom-right">Bottom-right</option>
-                  </select>
+                  Colour 3
+                  <input id="flag-colour-3" type="color" value="#1a4a8a" />
                 </label>
-                <label class="slider-label">
-                  Emblem size <output id="flag-emblem-size-value">60%</output>
-                  <input id="flag-emblem-size" type="range" min="15" max="100" step="5" value="60" />
+                <label>
+                  Emblem colour
+                  <input id="flag-emblem-colour" type="color" value="#d4a834" />
                 </label>
               </div>
             </div>
 
-            <div class="colour-grid">
-              <label>
-                Colour 1
-                <input id="flag-colour-1" type="color" value="#c81428" />
-              </label>
-              <label>
-                Colour 2
-                <input id="flag-colour-2" type="color" value="#ffffff" />
-              </label>
-              <label>
-                Colour 3
-                <input id="flag-colour-3" type="color" value="#1a4a8a" />
-              </label>
-              <label>
-                Emblem colour
-                <input id="flag-emblem-colour" type="color" value="#d4a834" />
-              </label>
-            </div>
-
-            <div class="kingdom-section">
-              <div class="section-label">Kingdom</div>
+            <div class="tab-pane" data-tab="kingdom" role="tabpanel">
               <div id="kingdom-picker" class="kingdom-picker"></div>
             </div>
           </div>

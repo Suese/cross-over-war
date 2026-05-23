@@ -133,6 +133,7 @@ function installProfileEditor() {
     };
   }
   installKingdomPicker();
+  installEditorTabs();
   refreshProfileDropdown();
   applyProfileToInputs();
   redrawPreview();
@@ -320,6 +321,24 @@ function installProfileEditor() {
     const target = myProfile.kingdomId ?? '';
     for (const card of root.querySelectorAll('.kingdom-card')) {
       card.classList.toggle('selected', (card.dataset.kingdomId ?? '') === target);
+    }
+  }
+
+  // ── Tab strip (Flag / Kingdom) ───────────────────────────────────────
+  // Wires the .tab-btn header strip to show/hide the matching .tab-pane.
+  // Pure UI affordance — nothing else in the editor cares which tab is
+  // active.
+  function installEditorTabs() {
+    const editor = $('profile-editor');
+    if (!editor) return;
+    const tabs = editor.querySelectorAll('.tab-btn');
+    const panes = editor.querySelectorAll('.tab-pane');
+    for (const tab of tabs) {
+      tab.addEventListener('click', () => {
+        const target = tab.dataset.tab;
+        for (const t of tabs) t.classList.toggle('active', t === tab);
+        for (const p of panes) p.classList.toggle('active', p.dataset.tab === target);
+      });
     }
   }
 }
@@ -681,7 +700,7 @@ function renderWaiting() {
       : (player.id === roomCode && mode === 'host' ? ' · Host'
         : (mode === 'client' && index === 0 ? ' · Host' : ''));
     const you = player.id === myId ? ' (you)' : '';
-    li.innerHTML = `<canvas class="player-flag-icon" width="40" height="26"></canvas>
+    li.innerHTML = `<canvas class="player-flag-icon" width="60" height="38"></canvas>
                     <strong class="player-name">${escapeHtml(player.name)}</strong>${you}
                     <span class="meta">${tag}</span>`;
     const iconCanvas = li.querySelector('canvas.player-flag-icon');
