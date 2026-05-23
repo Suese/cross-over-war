@@ -65,14 +65,17 @@ const ADDITIONAL_BIOME_PLACEMENT_ATTEMPTS = 60;
 // mountain (most open); 0.9 → roughly nine in ten (most closed).
 const BIOME_WALL_MIN = 0.5;
 const BIOME_WALL_MAX = 0.9;
-const BIOME_WALL_NOISE_SCALE = 0.22;
+// Closure noise scale — smaller numbers give larger, smoother mountain
+// blobs along the wall. Halved from the original fine-grained sampling so
+// the noise reads as natural ridges rather than scattered speckle.
+const BIOME_WALL_NOISE_SCALE = 0.11;
 // Local thickness range — each hex samples a slow noise field that decides
 // how far from the biome boundary the wall reaches at that point. The same
 // threshold applies on both sides, so total band width varies between
 // 2 * MIN and 2 * MAX hexes across the map (segments of thick range
 // alternating with passable saddles).
 const BIOME_WALL_THICKNESS_MIN = 1;
-const BIOME_WALL_THICKNESS_MAX = 3;
+const BIOME_WALL_THICKNESS_MAX = 2;
 const BIOME_WALL_THICKNESS_NOISE_SCALE = 0.06;
 // Coast wall — a biome's land tile that sits adjacent to ocean has a
 // chance to become its kingdom's mountain terrain. Capped at 1 hex deep
