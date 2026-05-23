@@ -794,9 +794,13 @@ function startHostSession() {
     onLeave: () => location.reload(),
   });
   // For peers already in the room when the host clicks Start: send each an init snapshot.
+  // CPU slots aren't real peers (no socket to send to, and the host already
+  // registered them with isComputer=true via startGameSession's player list).
+  // Announcing them here would clobber that flag and disable the CPU tick.
   for (const player of lobby.players) {
     if (player.id === myId) continue;
     if (player.connected === false) continue;
+    if (player.isComputer) continue;
     gameSession.announceClientConnected(player.id, player.name);
   }
 }

@@ -130,6 +130,9 @@ export class GameRoom {
   //   isComputer — true if the host owns this slot's actions (CPU player).
   addPlayer(connectingPlayerId, name, profile = null, options = {}) {
     const { kingdomId = null, isComputer = false } = options;
+    // Reconnect / re-announce calls (e.g. peer rejoining a saved game) should
+    // never flip the CPU flag on a slot that already exists. We only honour
+    // `isComputer` when creating a fresh slot below.
     const reusableSlot = this.players.find(p => !p.connected && p.name === name);
     if (reusableSlot) {
       // Map the saved hero(s) from the old id to the new id.
@@ -141,7 +144,6 @@ export class GameRoom {
       reusableSlot.connected = true;
       if (profile) reusableSlot.profile = profile;
       if (kingdomId !== undefined) reusableSlot.kingdomId = kingdomId;
-      if (isComputer !== undefined) reusableSlot.isComputer = isComputer;
       this._publishPlayersChanged();
       return connectingPlayerId;
     }
@@ -149,7 +151,6 @@ export class GameRoom {
     if (existing) {
       if (profile) existing.profile = profile;
       if (kingdomId !== undefined) existing.kingdomId = kingdomId;
-      if (isComputer !== undefined) existing.isComputer = isComputer;
       return connectingPlayerId;
     }
     this.players.push({
