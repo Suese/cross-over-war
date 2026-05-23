@@ -268,60 +268,49 @@ function installProfileEditor() {
   });
 
   // ── Kingdom picker ───────────────────────────────────────────────────
-  // Card-grid picker. "Random" is the first card and means the host picks a
-  // kingdom for this player at game start. Clicking a card writes its
-  // kingdom id (or null for Random) onto myProfile and auto-saves through
-  // the same onEditorChanged path the rest of the editor uses.
+  // Compact dropdown — empty value means "Random" (host picks one at game
+  // start). The kingdom's description shows in a small note line below the
+  // select; changes flow through the same auto-save / broadcast path as the
+  // rest of the editor.
   function installKingdomPicker() {
-    const root = $('kingdom-picker');
-    if (!root) return;
-    root.innerHTML = '';
-    const cards = [];
-    function addCard(kingdom) {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = 'kingdom-card';
-      card.dataset.kingdomId = kingdom?.id ?? '';
-      const isRandom = !kingdom;
-      const accent = isRandom ? '#7d8aa1' : hexToCss(kingdom.accentColour ?? 0x888888);
-      card.style.borderLeftColor = accent;
-      const title = document.createElement('div');
-      title.className = 'kingdom-card-title';
-      title.textContent = isRandom ? 'Random' : kingdom.name;
-      card.appendChild(title);
-      const desc = document.createElement('div');
-      desc.className = 'kingdom-card-desc';
-      desc.textContent = isRandom
-        ? "Let the host pick a kingdom for you at game start."
-        : (kingdom.description ?? '');
-      card.appendChild(desc);
-      card.addEventListener('click', () => {
-        myProfile.kingdomId = kingdom?.id ?? null;
-        refreshKingdomPickerSelection();
-        // Persist + broadcast through the normal editor change path so the
-        // active profile (and connected clients) pick up the new kingdom.
-        if (profiles[myProfile.name]) {
-          saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId);
-          profiles = loadAllProfiles();
-          refreshProfileDropdown();
-        }
-        broadcastProfileIfInLobby();
-      });
-      root.appendChild(card);
-      cards.push(card);
+    const select = $('kingdom-select');
+    if (!select) return;
+    select.innerHTML = '';
+    const randomOption = document.createElement('option');
+    randomOption.value = '';
+    randomOption.textContent = 'Random';
+    select.appendChild(randomOption);
+    for (const kingdom of lobbyKingdoms()) {
+      const opt = document.createElement('option');
+      opt.value = kingdom.id;
+      opt.textContent = kingdom.name;
+      select.appendChild(opt);
     }
-    addCard(null);
-    for (const kingdom of lobbyKingdoms()) addCard(kingdom);
+    select.addEventListener('change', () => {
+      myProfile.kingdomId = select.value || null;
+      refreshKingdomPickerSelection();
+      if (profiles[myProfile.name]) {
+        saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId);
+        profiles = loadAllProfiles();
+        refreshProfileDropdown();
+      }
+      broadcastProfileIfInLobby();
+    });
     refreshKingdomPickerSelection();
   }
 
   function refreshKingdomPickerSelection() {
-    const root = $('kingdom-picker');
-    if (!root) return;
-    const target = myProfile.kingdomId ?? '';
-    for (const card of root.querySelectorAll('.kingdom-card')) {
-      card.classList.toggle('selected', (card.dataset.kingdomId ?? '') === target);
+    const select = $('kingdom-select');
+    if (!select) return;
+    select.value = myProfile.kingdomId ?? '';
+    const desc = $('kingdom-description');
+    if (!desc) return;
+    if (!myProfile.kingdomId) {
+      desc.textContent = "Let the host pick a kingdom for you at game start.";
+      return;
     }
+    const kingdom = lobbyKingdoms().find(k => k.id === myProfile.kingdomId);
+    desc.textContent = kingdom?.description ?? '';
   }
 
   // ── Tab strip (Flag / Kingdom) ───────────────────────────────────────
@@ -700,7 +689,7 @@ function renderWaiting() {
       : (player.id === roomCode && mode === 'host' ? ' · Host'
         : (mode === 'client' && index === 0 ? ' · Host' : ''));
     const you = player.id === myId ? ' (you)' : '';
-    li.innerHTML = `<canvas class="player-flag-icon" width="60" height="38"></canvas>
+    li.innerHTML = `<canvas class="player-flag-icon" width="44" height="28"></canvas>
                     <strong class="player-name">${escapeHtml(player.name)}</strong>${you}
                     <span class="meta">${tag}</span>`;
     const iconCanvas = li.querySelector('canvas.player-flag-icon');

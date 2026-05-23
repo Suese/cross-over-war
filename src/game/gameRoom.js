@@ -907,7 +907,7 @@ export class GameRoom {
     const movement = getComponent(this.world, heroEntityId, 'Movement');
     const goal = { q: action.goalQ, r: action.goalR };
     const exploredKeys = this._playerExploredSet(playerId);
-    const blockedKeys = collectBlockedKeysExcluding(this.world, heroEntityId);
+    const blockedKeys = collectBlockedKeysExcluding(this.world, heroEntityId, goal);
     const traversalModes = collectTraversalModes(this.world, heroEntityId);
     // movementMax acts as the per-turn ceiling on a single tile's entry cost.
     // MP doesn't accumulate across turns, so any tile costing more than the
@@ -950,7 +950,11 @@ export class GameRoom {
     const fromQ = position.q;
     const fromR = position.r;
     const exploredKeys = this._playerExploredSet(playerId);
-    const blockedKeys = collectBlockedKeysExcluding(this.world, heroEntityId);
+    // The plan's terminal step is the original click goal — exempt it from
+    // soft blocks so the walker can finish on a collectable / POI even if
+    // intervening hexes route around them.
+    const goalStep = plan.steps[plan.steps.length - 1];
+    const blockedKeys = collectBlockedKeysExcluding(this.world, heroEntityId, goalStep);
     const traversalModes = collectTraversalModes(this.world, heroEntityId);
     const stepsRemaining = plan.steps.slice();
     const consumedPath = [];
@@ -1198,15 +1202,29 @@ function findVisitableAt(world, q, r) {
   return result;
 }
 
-// Collect the "q,r" key of every BlocksMovement+Position entity except the
-// caller's own (a planning hero must not consider itself an obstacle). Any
-// future map-object prefab that wants to block movement just attaches the
-// BlocksMovement component — the engine doesn't need to enumerate types.
-function collectBlockedKeysExcluding(world, excludeEntityId) {
+// Collect the "q,r" key of every blocking entity except the caller's own.
+//
+//   • Hard blocks (BlocksMovement) — heroes, anything the planner must
+//     always route around. Never exempt.
+//   • Soft blocks (Actionable)     — collectables and Conquerable POIs.
+//     Heroes can't path *through* them, but the goal hex is exempt so the
+//     planner can route TO an Actionable when the player clicks it.
+//
+// Pass `goalHex` for the soft-block exemption. Omit it (or pass null) for
+// callers that want every Actionable treated as blocked (e.g. world-state
+// snapshots).
+function collectBlockedKeysExcluding(world, excludeEntityId, goalHex = null) {
   const blocked = new Set();
+  const goalKey = goalHex ? (goalHex.q + ',' + goalHex.r) : null;
   forEachEntityWith(world, ['BlocksMovement', 'Position'], (entityId, _block, position) => {
     if (entityId === excludeEntityId) return;
     blocked.add(position.q + ',' + position.r);
+  });
+  forEachEntityWith(world, ['Actionable', 'Position'], (entityId, _act, position) => {
+    if (entityId === excludeEntityId) return;
+    const key = position.q + ',' + position.r;
+    if (key === goalKey) return;
+    blocked.add(key);
   });
   return blocked;
 }

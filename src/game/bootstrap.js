@@ -14,7 +14,7 @@ import {
   createWorld, getComponent, hasComponent, forEachEntityWith,
   applyChangeOps, addComponent, setChangeRecording,
 } from './ecs/world.js';
-import { playerColorCss, defaultFlagConfigFor } from './render/playerColors.js';
+import { defaultFlagConfigFor } from './render/playerColors.js';
 import { paintFlagToCanvas } from './render/flagMesh.js';
 import { createRegistry, getTerrain } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
@@ -151,7 +151,7 @@ export function startGameSession({
         setCanvasCursor('');
         return;
       }
-      const blockedKeys = collectBlockedKeysExcluding(viewerWorld(), heroId);
+      const blockedKeys = collectBlockedKeysExcluding(viewerWorld(), heroId, hex);
       const traversalModes = collectTraversalModes(viewerWorld(), heroId);
       const path = findPath(viewerWorld(), viewerRegistry(), position, hex, {
         exploredKeys, blockedKeys, traversalModes,
@@ -183,13 +183,21 @@ export function startGameSession({
           + escapeHtml(actionType.label ?? '')
           + '</span>'
         : null;
+      // Hero line — when hovering a hex with a hero on it, surface their
+      // name and the owner's flag (suppress the "Your hero" tagline; the
+      // viewer already knows their own heroes).
+      const heroInfo = findHeroAt(viewerWorld(), hex.q, hex.r);
+      const heroLine = heroInfo
+        ? flagMarkerHtml(heroInfo.ownerId, { width: 18 }) + ' '
+          + '<span style="color:#a8e6ff">' + escapeHtml(heroInfo.hero.name ?? 'Hero') + '</span>'
+        : null;
       // Conquest flag — shown for any Conquerable entity on the hex. The
-      // owner's name comes through with the player's tint; unowned states
-      // are still surfaced (grey flag + "Unclaimed") so the player can tell
-      // a structure is takeable before walking up to it.
+      // owner's actual flag goes here (tiny, ~18px wide); unowned states
+      // get a neutral grey rectangle so the player can still tell a
+      // structure is takeable before walking up to it.
       const conquest = findConquerableInfoAt(viewerWorld(), hex.q, hex.r);
       const conquestLine = conquest
-        ? '<span style="color:' + conquest.color + '">⚑</span> '
+        ? flagMarkerHtml(conquest.ownerId, { width: 18 }) + ' '
           + (conquest.ownerName
               ? 'Owned by ' + escapeHtml(conquest.ownerName)
               : '<span style="opacity:0.7">Unclaimed</span>')
@@ -202,7 +210,7 @@ export function startGameSession({
       cursorHud.show(
         event.clientX,
         event.clientY,
-        [travelLine, actionLine, conquestLine],
+        [travelLine, heroLine, actionLine, conquestLine],
       );
     },
     onPlanPath: (hex) => {
@@ -523,9 +531,9 @@ export function startGameSession({
   function buildMapObjectSection({ typeName, typeDescription, conquerable, owner }) {
     const ownerLine = conquerable
       ? plainLine(
-          flagMarkerHtml(owner) + ' '
-          + (owner.name
-              ? 'Owned by <span style="color:' + owner.color + '">' + escapeHtml(owner.name) + '</span>'
+          flagMarkerHtml(owner?.ownerId ?? null) + ' '
+          + (owner?.name
+              ? 'Owned by ' + escapeHtml(owner.name)
               : '<span style="opacity:0.7">Unclaimed</span>')
         )
       : '';
@@ -536,19 +544,20 @@ export function startGameSession({
   }
 
   // Render a small player-flag image (or a neutral grey square for unclaimed
-  // entities) for use inline in the right-click info panel. We paint into a
-  // throwaway canvas and embed the PNG as a data URL so the produced HTML is
-  // self-contained — the InfoOverlay receives the same `innerHTML` string it
-  // does for any other section. `vertical-align: -3px` lines the image up
-  // with the surrounding text baseline.
-  function flagMarkerHtml(owner) {
-    const w = 24, h = 16;
+  // entities) inline in HTML. Used by both the right-click info panel and
+  // the cursor tooltip; size is a hint — the tooltip wants something tiny
+  // (~18px wide) and the info panel something a bit beefier (~24px). We
+  // paint into a throwaway canvas and embed the PNG as a data URL so the
+  // produced HTML is self-contained.
+  function flagMarkerHtml(ownerId, options = {}) {
+    const w = options.width ?? 24;
+    const h = options.height ?? Math.round(w * 0.64);
     const canvas = document.createElement('canvas');
     canvas.width = w;
     canvas.height = h;
-    if (owner?.ownerId) {
-      const player = lastKnownPlayers.find(p => (p.playerId ?? p.id) === owner.ownerId);
-      const flag = player?.profile?.flag ?? defaultFlagConfigFor(owner.ownerId);
+    if (ownerId) {
+      const player = lastKnownPlayers.find(p => (p.playerId ?? p.id) === ownerId);
+      const flag = player?.profile?.flag ?? defaultFlagConfigFor(ownerId);
       paintFlagToCanvas(canvas, flag, viewerRegistry());
     } else {
       const ctx = canvas.getContext('2d');
@@ -577,7 +586,6 @@ export function startGameSession({
         owner = {
           ownerId,
           name: ownerPlayer?.name ?? null,
-          color: ownerId ? playerColorCss(ownerId) : '#888',
         };
       }
       result = {
@@ -590,9 +598,11 @@ export function startGameSession({
     return result;
   }
 
-  function buildHeroSection({ entityId, hero, ownerPlayerName, isViewerOwned }) {
-    const ownerLine = ownerPlayerName
-      ? plainLine('<span style="opacity:0.75">' + (isViewerOwned ? 'Your hero' : 'Owned by ' + escapeHtml(ownerPlayerName)) + '</span>')
+  function buildHeroSection({ entityId, hero, ownerId, ownerPlayerName, isViewerOwned }) {
+    const ownerLabel = isViewerOwned ? 'Your hero'
+      : (ownerPlayerName ? 'Owned by ' + escapeHtml(ownerPlayerName) : null);
+    const ownerLine = ownerLabel
+      ? plainLine(flagMarkerHtml(ownerId) + ' <span style="opacity:0.75">' + ownerLabel + '</span>')
       : '';
     const modes = collectTraversalModes(viewerWorld(), entityId);
     const modesLine = modes.length
@@ -655,9 +665,9 @@ export function startGameSession({
     return result;
   }
 
-  // Returns conquest info for any Conquerable entity on (q, r). The flag is
-  // tinted to the owner's colour; unconquered entries get a neutral grey so
-  // hovering still tells you the thing IS conquerable.
+  // Returns conquest info for any Conquerable entity on (q, r). Callers
+  // pass `ownerId` to `flagMarkerHtml` for the inline owner-flag image;
+  // unowned entries (ownerId null) render as a neutral grey rectangle.
   function findConquerableInfoAt(world, q, r) {
     let result = null;
     forEachEntityWith(world, ['Conquerable', 'Position'], (entityId, _c, position) => {
@@ -671,7 +681,6 @@ export function startGameSession({
       result = {
         ownerId,
         ownerName: ownerPlayer?.name ?? null,
-        color: ownerId ? playerColorCss(ownerId) : '#888',
       };
     });
     return result;
@@ -695,6 +704,7 @@ export function startGameSession({
       result = {
         entityId,
         hero,
+        ownerId,
         ownerPlayerName: ownerPlayer?.name ?? null,
         isViewerOwned: ownerId === myPlayerId,
       };
@@ -846,11 +856,25 @@ export function startGameSession({
 
 // Local mirror of the host-side helper so the client's hover preview agrees
 // with the host's authoritative planner about which tiles are blocked.
-function collectBlockedKeysExcluding(world, excludeEntityId) {
+//
+// Two kinds of blocks are added:
+//   • Hard blocks (BlocksMovement)  — heroes, things the planner must always
+//     route around. The goal can never be a hard block.
+//   • Soft blocks (Actionable)      — collectables and Conquerable POIs.
+//     Heroes cannot path *through* them, but the goal hex is exempt so the
+//     planner can route TO an Actionable when the player clicks it directly.
+function collectBlockedKeysExcluding(world, excludeEntityId, goalHex = null) {
   const blocked = new Set();
+  const goalKey = goalHex ? (goalHex.q + ',' + goalHex.r) : null;
   forEachEntityWith(world, ['BlocksMovement', 'Position'], (entityId, _block, position) => {
     if (entityId === excludeEntityId) return;
     blocked.add(position.q + ',' + position.r);
+  });
+  forEachEntityWith(world, ['Actionable', 'Position'], (entityId, _act, position) => {
+    if (entityId === excludeEntityId) return;
+    const key = position.q + ',' + position.r;
+    if (key === goalKey) return;  // soft block — the goal is fair game
+    blocked.add(key);
   });
   return blocked;
 }
