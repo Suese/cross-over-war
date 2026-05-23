@@ -48,5 +48,7 @@ export function defaultFlagConfigFor(playerId) {
     stripe: 'horizontal',
     emblemId: 'base/sun',
     emblemColour: 0xfff0c0,
+    emblemSize: 0.6,
+    emblemPosition: 'center',
   };
 }

@@ -167,9 +167,9 @@ button.danger:hover:not(:disabled) { background: rgba(255, 88, 114, 0.12); }
   border-radius: 4px;
   background: var(--bg-1);
   border: 1px solid var(--border);
-  width: 64px;
-  height: 48px;
-  flex: 0 0 64px;
+  width: 80px;
+  height: 51px;
+  flex: 0 0 80px;
 }
 .profile-editor[open] > summary { border-bottom: 1px solid var(--border); }
 .profile-editor-body {
@@ -197,12 +197,12 @@ button.danger:hover:not(:disabled) { background: rgba(255, 88, 114, 0.12); }
   align-items: stretch;
 }
 .flag-preview-row #flag-preview-canvas {
-  flex: 0 0 160px;
+  flex: 0 0 200px;
   background: var(--bg-1);
   border: 1px solid var(--border);
   border-radius: 8px;
-  width: 160px;
-  height: 120px;
+  width: 200px;
+  height: 128px;
 }
 .flag-preview-row .flag-controls {
   flex: 1 1 auto;
@@ -216,6 +216,21 @@ button.danger:hover:not(:disabled) { background: rgba(255, 88, 114, 0.12); }
   gap: 4px;
   font-size: 11px;
   color: var(--ink-dim);
+}
+.flag-preview-row .flag-controls .slider-label {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.flag-preview-row .flag-controls .slider-label output {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  margin-left: auto;
+}
+.flag-preview-row .flag-controls .slider-label input[type="range"] {
+  flex: 1 1 100%;
+  margin: 0;
 }
 .colour-grid {
   display: grid;

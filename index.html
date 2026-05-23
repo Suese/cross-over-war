@@ -27,7 +27,7 @@
         <details id="profile-editor" class="profile-editor" open>
           <summary>
             <span class="summary-label">Profile &amp; flag</span>
-            <canvas id="profile-summary-preview" width="64" height="48"></canvas>
+            <canvas id="profile-summary-preview" width="80" height="51"></canvas>
           </summary>
           <div class="profile-editor-body">
             <div class="row">
@@ -41,7 +41,7 @@
             </div>
 
             <div class="flag-preview-row">
-              <canvas id="flag-preview-canvas" width="160" height="120"></canvas>
+              <canvas id="flag-preview-canvas" width="200" height="128"></canvas>
               <div class="flag-controls">
                 <label>
                   Stripe direction
@@ -54,6 +54,20 @@
                 <label>
                   Emblem
                   <select id="flag-emblem"></select>
+                </label>
+                <label>
+                  Emblem position
+                  <select id="flag-emblem-position">
+                    <option value="center">Centre</option>
+                    <option value="top-left">Top-left</option>
+                    <option value="top-right">Top-right</option>
+                    <option value="bottom-left">Bottom-left</option>
+                    <option value="bottom-right">Bottom-right</option>
+                  </select>
+                </label>
+                <label class="slider-label">
+                  Emblem size <output id="flag-emblem-size-value">60%</output>
+                  <input id="flag-emblem-size" type="range" min="15" max="100" step="5" value="60" />
                 </label>
               </div>
             </div>

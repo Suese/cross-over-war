@@ -37,7 +37,13 @@ const POLE_HEIGHT = 0.75;
 const POLE_RADIUS = 0.025;
 const CLOTH_WIDTH = 0.50;
 const CLOTH_HEIGHT = 0.32;
-const FLAG_TEXTURE_SIZE = 128;
+// In-game cloth texture matches the cloth's aspect ratio so the stripes /
+// emblem don't get stretched when mapped onto the plane.
+const FLAG_TEXTURE_WIDTH = 200;
+const FLAG_TEXTURE_HEIGHT = 128;
+
+export const VALID_STRIPES = ['horizontal', 'vertical', 'diagonal'];
+export const VALID_EMBLEM_POSITIONS = ['center', 'top-left', 'top-right', 'bottom-left', 'bottom-right'];
 
 // Default flag if a player has nothing configured yet (or a remote player's
 // config hasn't arrived). Crimson over white over navy with a sun emblem in
@@ -47,6 +53,8 @@ export const DEFAULT_FLAG_CONFIG = Object.freeze({
   stripe: 'horizontal',
   emblemId: 'base/sun',
   emblemColour: 0xd4a834,
+  emblemSize: 0.6,
+  emblemPosition: 'center',
 });
 
 // Build a mesh group containing the pole and the cloth. The cloth's
@@ -64,8 +72,8 @@ export function buildFlagMesh(flagConfig, registry) {
   group.add(pole);
 
   const canvas = document.createElement('canvas');
-  canvas.width = FLAG_TEXTURE_SIZE;
-  canvas.height = FLAG_TEXTURE_SIZE;
+  canvas.width = FLAG_TEXTURE_WIDTH;
+  canvas.height = FLAG_TEXTURE_HEIGHT;
   const texture = new CanvasTexture(canvas);
   texture.colorSpace = SRGBColorSpace;
   texture.anisotropy = 4;
@@ -121,9 +129,17 @@ function sanitiseConfig(flagConfig) {
   while (colours.length < 3) colours.push(DEFAULT_FLAG_CONFIG.colours[colours.length]);
   merged.colours = colours.map(coerceHex);
   merged.emblemColour = coerceHex(merged.emblemColour);
-  if (!['horizontal', 'vertical', 'diagonal'].includes(merged.stripe)) merged.stripe = 'horizontal';
+  if (!VALID_STRIPES.includes(merged.stripe)) merged.stripe = 'horizontal';
   if (typeof merged.emblemId !== 'string' || !merged.emblemId) merged.emblemId = 'base/blank';
+  merged.emblemSize = clampNumber(merged.emblemSize, 0.15, 1.0, DEFAULT_FLAG_CONFIG.emblemSize);
+  if (!VALID_EMBLEM_POSITIONS.includes(merged.emblemPosition)) merged.emblemPosition = 'center';
   return merged;
+}
+
+function clampNumber(value, lo, hi, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(lo, Math.min(hi, n));
 }
 
 function coerceHex(value) {
@@ -141,67 +157,85 @@ function hexToCss(hex) {
 }
 
 function paintFlagTexture(canvas, config, registry) {
-  const size = canvas.width;
+  const w = canvas.width;
+  const h = canvas.height;
   const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, size, size);
-  paintStripes(ctx, size, config.colours, config.stripe);
-  paintEmblem(ctx, size, config, registry);
+  ctx.clearRect(0, 0, w, h);
+  paintStripes(ctx, w, h, config.colours, config.stripe);
+  paintEmblem(ctx, w, h, config, registry);
 }
 
-function paintStripes(ctx, size, colours, stripe) {
+function paintStripes(ctx, w, h, colours, stripe) {
   const [a, b, c] = colours;
   if (stripe === 'horizontal') {
-    const band = size / 3;
-    ctx.fillStyle = hexToCss(a); ctx.fillRect(0, 0, size, band);
-    ctx.fillStyle = hexToCss(b); ctx.fillRect(0, band, size, band);
-    ctx.fillStyle = hexToCss(c); ctx.fillRect(0, band * 2, size, band);
+    const band = h / 3;
+    ctx.fillStyle = hexToCss(a); ctx.fillRect(0, 0, w, band);
+    ctx.fillStyle = hexToCss(b); ctx.fillRect(0, band, w, band);
+    ctx.fillStyle = hexToCss(c); ctx.fillRect(0, band * 2, w, band);
     return;
   }
   if (stripe === 'vertical') {
-    const band = size / 3;
-    ctx.fillStyle = hexToCss(a); ctx.fillRect(0, 0, band, size);
-    ctx.fillStyle = hexToCss(b); ctx.fillRect(band, 0, band, size);
-    ctx.fillStyle = hexToCss(c); ctx.fillRect(band * 2, 0, band, size);
+    const band = w / 3;
+    ctx.fillStyle = hexToCss(a); ctx.fillRect(0, 0, band, h);
+    ctx.fillStyle = hexToCss(b); ctx.fillRect(band, 0, band, h);
+    ctx.fillStyle = hexToCss(c); ctx.fillRect(band * 2, 0, band, h);
     return;
   }
-  // Diagonal: three bands cut top-left → bottom-right.
-  // Fill the whole canvas with the middle colour first, then paint the
-  // bottom-left triangle in `a` and the top-right triangle in `c`.
-  ctx.fillStyle = hexToCss(b); ctx.fillRect(0, 0, size, size);
-  // Offsets chosen so each diagonal band covers roughly a third of the area.
-  const offset = size * 0.33;
+  // Diagonal: three bands cut top-left → bottom-right, anchored to the
+  // actual canvas dimensions rather than a single `size` so non-square
+  // canvases still get equal-area regions.
+  ctx.fillStyle = hexToCss(b); ctx.fillRect(0, 0, w, h);
   ctx.fillStyle = hexToCss(a);
   ctx.beginPath();
   ctx.moveTo(0, 0);
-  ctx.lineTo(size - offset, 0);
-  ctx.lineTo(0, size - offset);
+  ctx.lineTo(w * 0.67, 0);
+  ctx.lineTo(0, h * 0.67);
   ctx.closePath();
   ctx.fill();
   ctx.fillStyle = hexToCss(c);
   ctx.beginPath();
-  ctx.moveTo(size, size);
-  ctx.lineTo(offset, size);
-  ctx.lineTo(size, offset);
+  ctx.moveTo(w, h);
+  ctx.lineTo(w * 0.33, h);
+  ctx.lineTo(w, h * 0.33);
   ctx.closePath();
   ctx.fill();
 }
 
-function paintEmblem(ctx, size, config, registry) {
+function paintEmblem(ctx, w, h, config, registry) {
   if (!config.emblemId || config.emblemId === 'base/blank') return;
   const emblem = registry ? getEmblem(registry, config.emblemId) : null;
   if (!emblem?.draw) return;
-  // Emblem renders into a temp canvas at the same resolution so its
-  // composite operations don't bleed into the stripe layer.
+  // Emblem authors paint into a square subcanvas. We allocate that square
+  // sized by `emblemSize` relative to the shorter cloth axis, then composite
+  // it onto the stripe layer at the requested corner / centre.
+  const shortAxis = Math.min(w, h);
+  const square = Math.max(8, Math.round(shortAxis * config.emblemSize));
   const tmp = document.createElement('canvas');
-  tmp.width = size; tmp.height = size;
+  tmp.width = square;
+  tmp.height = square;
   const tmpCtx = tmp.getContext('2d');
   try {
-    emblem.draw(tmpCtx, size, config.emblemColour & 0xffffff);
+    emblem.draw(tmpCtx, square, config.emblemColour & 0xffffff);
   } catch (err) {
     console.warn('emblem draw failed for ' + config.emblemId, err);
     return;
   }
-  ctx.drawImage(tmp, 0, 0);
+  // Pad corner placements off the edge by a small fraction of the canvas so
+  // the emblem sits inside the cloth rather than touching the seam.
+  const padding = Math.round(shortAxis * 0.06);
+  let dx, dy;
+  switch (config.emblemPosition) {
+    case 'top-left':     dx = padding;            dy = padding;            break;
+    case 'top-right':    dx = w - square - padding; dy = padding;          break;
+    case 'bottom-left':  dx = padding;            dy = h - square - padding; break;
+    case 'bottom-right': dx = w - square - padding; dy = h - square - padding; break;
+    case 'center':
+    default:
+      dx = (w - square) / 2;
+      dy = (h - square) / 2;
+      break;
+  }
+  ctx.drawImage(tmp, dx, dy);
 }
 
 // Convenience colour for surrounding UI tints (lobby dots, hero body, etc.).

@@ -51,13 +51,26 @@ const PLACEHOLDER_MATERIAL = new MeshStandardMaterial({
 // (cloned per-entity so multiple instances can share a single source asset)
 // when the bytes arrive. The mesh stashes `userData.assetRelease` so the
 // renderer can drop the asset refcount when the mesh leaves the scene.
-function buildStreamedMesh(assets, modelKey, requestedBy) {
+//
+// Options:
+//   requestedBy : string  — tag carried into asset audit logs.
+//   flagAttachY : number? — if set, the group gets a `flag-attach` child
+//                            placed at (0, flagAttachY, 0). Otherwise the
+//                            renderer looks for a `flag-attach` named node
+//                            inside the loaded GLB scene.
+function buildStreamedMesh(assets, modelKey, requestedBy, options = {}) {
   const group = new Group();
   const placeholder = new Mesh(PLACEHOLDER_GEOMETRY, PLACEHOLDER_MATERIAL);
   placeholder.position.y = 0.4;
   placeholder.castShadow = true;
   placeholder.receiveShadow = false;
   group.add(placeholder);
+  if (typeof options.flagAttachY === 'number') {
+    const attach = new Group();
+    attach.name = 'flag-attach';
+    attach.position.set(0, options.flagAttachY, 0);
+    group.add(attach);
+  }
   let acquired = false;
   assets.requestModel(modelKey, (scene) => {
     if (!scene) return;
@@ -143,6 +156,40 @@ export function createSceneRenderer(canvas) {
     flagConfigByPlayerId.set(playerId, flagConfig ?? null);
   }
   function clearFlagConfigs() { flagConfigByPlayerId.clear(); }
+
+  // Mount or repaint the player-customised flag on an entity that has both
+  // `BearsFlag` and `Ownership`. The entity's mesh must expose a Group named
+  // `flag-attach` placed at the desired pole base — the flag becomes a child
+  // of that group. Re-runs each frame for entities we render, but skips the
+  // expensive texture repaint when the cached flag config reference hasn't
+  // changed. Lives inside the closure so it can read the local config map.
+  function mountOrUpdateFlag(meshRoot, world, registry, entityId) {
+    if (!meshRoot?.getObjectByName) return;
+    const attach = meshRoot.getObjectByName('flag-attach');
+    if (!attach) return;
+    const wantsFlag = hasComponent(world, entityId, 'BearsFlag');
+    const ownership = getComponent(world, entityId, 'Ownership');
+    const ownerId = ownership?.playerId ?? null;
+    let mounted = attach.children.find(child => child.name === 'mounted-flag');
+    if (!wantsFlag || !ownerId) {
+      if (mounted) {
+        attach.remove(mounted);
+        disposeFlagMesh(mounted);
+      }
+      return;
+    }
+    const config = flagConfigByPlayerId.get(ownerId) ?? null;
+    if (!mounted) {
+      mounted = buildFlagMesh(config, registry);
+      mounted.userData.flagSourceRef = config;
+      attach.add(mounted);
+      return;
+    }
+    if (mounted.userData?.flagSourceRef !== config) {
+      applyFlagConfig(mounted, config, registry);
+      mounted.userData.flagSourceRef = config;
+    }
+  }
 
   function syncObjects(world, viewerPlayerId, registry, assets, options = {}) {
     const heroAnimations = options.heroAnimations;
@@ -275,7 +322,14 @@ export function createSceneRenderer(canvas) {
   //   3. Nothing renderable — return null so the renderer skips the entity.
   function buildMapObjectMesh(world, registry, assets, mapObject, entityId) {
     const assetRef = getComponent(world, entityId, 'AssetReference');
-    if (assetRef?.modelKey) return buildStreamedMesh(assets, assetRef.modelKey, 'mapObject:' + (mapObject.typeId ?? entityId));
+    if (assetRef?.modelKey) {
+      return buildStreamedMesh(
+        assets,
+        assetRef.modelKey,
+        'mapObject:' + (mapObject.typeId ?? entityId),
+        { flagAttachY: assetRef.flagAttachY },
+      );
+    }
     const type = registry.mapObjectTypes.get(mapObject.typeId);
     if (type?.buildMesh) return type.buildMesh(registry, assets, mapObject);
     return null;
@@ -379,41 +433,6 @@ export function createSceneRenderer(canvas) {
 function terrainHeightAt(world, registry, q, r) {
   const terrain = getEffectiveTerrainAt(world, registry, q, r);
   return terrain?.tileHeight ?? 0;
-}
-
-// Mount or repaint the player-customised flag on an entity that has both
-// `BearsFlag` and `Ownership`. The entity's mesh must expose a Group named
-// `flag-attach` placed at the desired pole base — the flag becomes a child
-// of that group. Re-runs each frame for entities we render, but skips the
-// expensive texture repaint when the cached flag config hasn't changed.
-function mountOrUpdateFlag(meshRoot, world, registry, entityId) {
-  if (!meshRoot?.getObjectByName) return;
-  const attach = meshRoot.getObjectByName('flag-attach');
-  if (!attach) return;
-  const wantsFlag = hasComponent(world, entityId, 'BearsFlag');
-  const ownership = getComponent(world, entityId, 'Ownership');
-  const ownerId = ownership?.playerId ?? null;
-  let mounted = attach.children.find(child => child.name === 'mounted-flag');
-  if (!wantsFlag || !ownerId) {
-    if (mounted) {
-      attach.remove(mounted);
-      disposeFlagMesh(mounted);
-    }
-    return;
-  }
-  const config = flagConfigByPlayerId.get(ownerId) ?? null;
-  if (!mounted) {
-    mounted = buildFlagMesh(config, registry);
-    mounted.userData.flagSourceRef = config;
-    attach.add(mounted);
-    return;
-  }
-  // Repaint when the config reference shifts (cheap pointer compare — the
-  // bootstrap only swaps configs when the player actually edits them).
-  if (mounted.userData?.flagSourceRef !== config) {
-    applyFlagConfig(mounted, config, registry);
-    mounted.userData.flagSourceRef = config;
-  }
 }
 
 function viewerFog(world, viewerPlayerId) {

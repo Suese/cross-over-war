@@ -28,6 +28,7 @@ import {
   registerPrefab,
   registerMapObjectType,
   registerBiomeDecorator,
+  declareAssetReference,
   getTerrain,
   spawnFromPrefab,
 } from '../../game/ecs/registry.js';
@@ -104,12 +105,15 @@ export default {
     });
 
     // ── Mushroom Hut ────────────────────────────────────────────────────
+    // The visual comes from base/mushroom-hut.glb, streamed via AssetReference
+    // — no procedural buildMesh registered. The streamed mesh stamps in a
+    // `flag-attach` Group just above the cap so the conquest flag mounts at
+    // a sensible height regardless of the GLB's internal hierarchy.
     registerMapObjectType(registry, {
       id: HUT_TYPE_ID,
       name: 'Mushroom Hut',
       description: 'A toadstool-shaped cottage. Smoke curls from the window.',
       prefabId: HUT_PREFAB_ID,
-      buildMesh: () => buildMushroomHutMesh(),
     });
     registerPrefab(registry, HUT_PREFAB_ID, (world, params) => {
       const anchorQ = params.q ?? 0;
@@ -121,12 +125,20 @@ export default {
       addComponent(world, poiId, 'Actionable', { actionTypeId: 'base/visit' });
       addComponent(world, poiId, 'Conquerable', {});
       addComponent(world, poiId, 'BearsFlag', {});
+      addComponent(world, poiId, 'AssetReference', {
+        modelKey: 'base/mushroom-hut.glb',
+        flagAttachY: 1.9,
+      });
       for (const offset of HUT_FOOTPRINT_OFFSETS) {
         const wallId = createEntity(world);
         addComponent(world, wallId, 'Position', { q: anchorQ + offset.dq, r: anchorR + offset.dr });
         addComponent(world, wallId, 'TerrainOverride', { terrainId: 'bramble' });
       }
       return poiId;
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/mushroom-hut.glb', declaredFor: 'mapObject:' + HUT_TYPE_ID,
     });
 
     // ── Castle ──────────────────────────────────────────────────────────
@@ -317,65 +329,6 @@ function buildCampfireMesh() {
   innerFlame.position.y = 0.36;
   group.add(innerFlame);
   return group;
-}
-
-function buildMushroomHutMesh() {
-  const inner = new Group();
-  const stem = new Mesh(
-    new CylinderGeometry(0.55, 0.72, 1.55, 16),
-    new MeshStandardMaterial({ color: 0xe8d3a8, roughness: 0.9 }),
-  );
-  stem.position.set(0, 0.77, 0);
-  stem.castShadow = true;
-  stem.receiveShadow = true;
-  inner.add(stem);
-  const door = new Mesh(
-    new BoxGeometry(0.42, 0.7, 0.06),
-    new MeshStandardMaterial({ color: 0x3a2418, roughness: 0.95 }),
-  );
-  door.position.set(0, 0.5, 0.6);
-  door.castShadow = true;
-  inner.add(door);
-  const windowPane = new Mesh(
-    new BoxGeometry(0.22, 0.22, 0.04),
-    new MeshStandardMaterial({
-      color: 0xffe4a0, emissive: 0xffaa44, emissiveIntensity: 0.85, roughness: 0.4,
-    }),
-  );
-  windowPane.position.set(-0.35, 1.08, 0.59);
-  inner.add(windowPane);
-  const cap = new Mesh(
-    new SphereGeometry(1.0, 24, 14, 0, Math.PI * 2, 0, Math.PI / 2 + 0.15),
-    new MeshStandardMaterial({ color: 0xc23026, roughness: 0.55 }),
-  );
-  cap.position.set(0, 1.45, 0);
-  cap.scale.set(1.0, 0.7, 1.0);
-  cap.castShadow = true;
-  inner.add(cap);
-  // Flag attachment point — the renderer mounts the player's generic flag
-  // mesh here whenever the entity carries a `BearsFlag` + `Ownership` pair.
-  const flagAttach = new Group();
-  flagAttach.name = 'flag-attach';
-  flagAttach.position.set(0, 2.0, 0);
-  inner.add(flagAttach);
-  const spotMaterial = new MeshStandardMaterial({ color: 0xfaf0e0, roughness: 0.7 });
-  const spots = [
-    { x: -0.40, y: 1.86, z: -0.35 },
-    { x:  0.42, y: 1.92, z: -0.20 },
-    { x:  0.05, y: 2.02, z:  0.20 },
-    { x: -0.25, y: 1.70, z:  0.45 },
-    { x:  0.55, y: 1.62, z:  0.40 },
-  ];
-  for (const pos of spots) {
-    const spot = new Mesh(new SphereGeometry(0.12, 8, 6), spotMaterial);
-    spot.position.set(pos.x, pos.y, pos.z);
-    inner.add(spot);
-  }
-  const outer = new Group();
-  inner.scale.set(1.125, 1.125, 1.125);
-  inner.position.set(0, 0, -0.75);
-  outer.add(inner);
-  return outer;
 }
 
 // Castle — outer wall ring + 4 corner towers + central keep + flag on top.

@@ -104,6 +104,9 @@ function installProfileEditor() {
   const summaryCanvas = $('profile-summary-preview');
   const stripeSelect = $('flag-stripe');
   const emblemSelect = $('flag-emblem');
+  const emblemPositionSelect = $('flag-emblem-position');
+  const emblemSizeInput = $('flag-emblem-size');
+  const emblemSizeOutput = $('flag-emblem-size-value');
   const colourInputs = [$('flag-colour-1'), $('flag-colour-2'), $('flag-colour-3')];
   const emblemColour = $('flag-emblem-colour');
   const profileSelect = $('profile-select');
@@ -133,6 +136,7 @@ function installProfileEditor() {
 
   // ── Editor → state ────────────────────────────────────────────────────
   function readEditorIntoProfile() {
+    const sizePercent = Number(emblemSizeInput.value);
     myProfile = {
       name: $('name-input').value.trim().slice(0, 16) || 'Commander',
       flag: sanitiseFlagConfig({
@@ -140,8 +144,11 @@ function installProfileEditor() {
         stripe: stripeSelect.value,
         emblemId: emblemSelect.value,
         emblemColour: emblemColour.value,
+        emblemSize: Number.isFinite(sizePercent) ? sizePercent / 100 : 0.6,
+        emblemPosition: emblemPositionSelect.value,
       }),
     };
+    if (emblemSizeOutput) emblemSizeOutput.value = Math.round(myProfile.flag.emblemSize * 100) + '%';
   }
 
   function onEditorChanged() {
@@ -155,7 +162,11 @@ function installProfileEditor() {
     }
     broadcastProfileIfInLobby();
   }
-  for (const input of [...colourInputs, emblemColour, stripeSelect, emblemSelect]) {
+  for (const input of [
+    ...colourInputs,
+    emblemColour, stripeSelect, emblemSelect,
+    emblemPositionSelect, emblemSizeInput,
+  ]) {
     input.addEventListener('input', onEditorChanged);
     input.addEventListener('change', onEditorChanged);
   }
@@ -166,6 +177,10 @@ function installProfileEditor() {
     $('name-input').value = myProfile.name;
     stripeSelect.value = myProfile.flag.stripe;
     emblemSelect.value = myProfile.flag.emblemId;
+    emblemPositionSelect.value = myProfile.flag.emblemPosition ?? 'center';
+    const sizePercent = Math.round((myProfile.flag.emblemSize ?? 0.6) * 100);
+    emblemSizeInput.value = String(sizePercent);
+    if (emblemSizeOutput) emblemSizeOutput.value = sizePercent + '%';
     for (let i = 0; i < colourInputs.length; i++) {
       colourInputs[i].value = hexToCss(myProfile.flag.colours[i]);
     }
