@@ -7,12 +7,11 @@ import { listSaves, loadSave, deleteSave } from './game/persistence.js';
 import { MESSAGE_KINDS } from './game/protocol.js';
 import {
   loadAllProfiles, saveProfile, deleteProfile,
-  loadActiveProfileKey, saveActiveProfileKey,
-  defaultLobbyProfile, paintPreview, lobbyEmblems,
+  loadActiveProfileName, saveActiveProfileName,
+  defaultLobbyProfile, paintPreview, lobbyEmblems, lobbyKingdoms,
   sanitiseFlagConfig,
 } from './lobbyProfiles.js';
-
-const PLAYER_COLORS = ['#c81428', '#1a4a8a', '#1a8a50', '#d4a834', '#6a3aa8', '#c46a14'];
+import { defaultFlagConfigFor } from './game/render/playerColors.js';
 
 let mode = null;       // 'host' | 'client'
 let host = null;       // HostNet
@@ -35,13 +34,9 @@ let pendingSaveSnapshot = null;   // set when the host picks a save before click
 
 const $ = (id) => document.getElementById(id);
 
-// ── Saved name ──────────────────────────────────────────────────────────────
-{
-  try {
-    const saved = localStorage.getItem('crossOverWarName');
-    if (saved) $('name-input').value = saved;
-  } catch {}
-}
+// Name is loaded from the active profile (or the editor's default) once the
+// profile editor wires up below. We no longer keep a parallel
+// `crossOverWarName` key — `crossOverWarActiveProfile` is the source of truth.
 
 // ── URL ?room= picks the lobby mode ─────────────────────────────────────────
 {
@@ -66,6 +61,10 @@ $('start-btn').addEventListener('click', () => {
   lobby.started = true;
   broadcastLobby();
   startHostSession();
+});
+$('add-cpu-btn').addEventListener('click', () => {
+  if (mode !== 'host') return;
+  addCpuPlayer();
 });
 $('copy-code').addEventListener('click', () => {
   const url = roomUrl(roomCode);
@@ -121,15 +120,19 @@ function installProfileEditor() {
     emblemSelect.appendChild(option);
   }
 
-  // Load profiles + active selection out of localStorage.
+  // Load profiles + last-active name out of localStorage. The active name is
+  // just the commander name the player was using last session — it's only a
+  // selection hint, not a separate identity.
   let profiles = loadAllProfiles();
-  let activeKey = loadActiveProfileKey();
-  if (activeKey && profiles[activeKey]) {
+  const lastActive = loadActiveProfileName();
+  if (lastActive && profiles[lastActive]) {
     myProfile = {
-      name: profiles[activeKey].name ?? 'Commander',
-      flag: sanitiseFlagConfig(profiles[activeKey].flag),
+      name: lastActive,
+      flag: sanitiseFlagConfig(profiles[lastActive].flag),
+      kingdomId: profiles[lastActive].kingdomId ?? null,
     };
   }
+  installKingdomPicker();
   refreshProfileDropdown();
   applyProfileToInputs();
   redrawPreview();
@@ -147,6 +150,7 @@ function installProfileEditor() {
         emblemSize: Number.isFinite(sizePercent) ? sizePercent / 100 : 0.6,
         emblemPosition: emblemPositionSelect.value,
       }),
+      kingdomId: myProfile.kingdomId ?? null,
     };
     if (emblemSizeOutput) emblemSizeOutput.value = Math.round(myProfile.flag.emblemSize * 100) + '%';
   }
@@ -154,12 +158,16 @@ function installProfileEditor() {
   function onEditorChanged() {
     readEditorIntoProfile();
     redrawPreview();
-    // While a profile is selected, treat edits as an auto-save so closing
-    // the browser doesn't lose the change.
-    if (activeKey) {
-      saveProfile(activeKey, myProfile);
+    // If the current name matches an already-saved profile, treat live edits
+    // as auto-saves so the player doesn't lose tweaks on close. Typing a new
+    // name (one that isn't saved yet) does NOT auto-create a profile — the
+    // player has to click Save once to opt in.
+    if (profiles[myProfile.name]) {
+      saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId);
+      saveActiveProfileName(myProfile.name);
       profiles = loadAllProfiles();
     }
+    refreshProfileDropdown();
     broadcastProfileIfInLobby();
   }
   for (const input of [
@@ -185,6 +193,7 @@ function installProfileEditor() {
       colourInputs[i].value = hexToCss(myProfile.flag.colours[i]);
     }
     emblemColour.value = hexToCss(myProfile.flag.emblemColour);
+    refreshKingdomPickerSelection();
   }
 
   function redrawPreview() {
@@ -193,12 +202,15 @@ function installProfileEditor() {
   }
 
   // ── Profile dropdown ─────────────────────────────────────────────────
+  // The dropdown lists saved profile names (== commander names). The
+  // selection mirrors `myProfile.name` when that name matches a stored
+  // profile; otherwise nothing is selected (the player has either typed a
+  // new name or edited an existing profile's name without saving yet).
   function refreshProfileDropdown() {
-    const previousValue = profileSelect.value;
     profileSelect.innerHTML = '';
     const blank = document.createElement('option');
     blank.value = '';
-    blank.textContent = profiles && Object.keys(profiles).length ? '— Custom (unsaved) —' : '— No saved profiles —';
+    blank.textContent = Object.keys(profiles).length ? '— Unsaved —' : '— No saved profiles —';
     profileSelect.appendChild(blank);
     for (const key of Object.keys(profiles).sort()) {
       const option = document.createElement('option');
@@ -206,22 +218,30 @@ function installProfileEditor() {
       option.textContent = key;
       profileSelect.appendChild(option);
     }
-    profileSelect.value = activeKey && profiles[activeKey] ? activeKey : previousValue;
-    $('profile-delete').disabled = !activeKey || !profiles[activeKey];
-    $('profile-save').disabled = !activeKey || !profiles[activeKey];
+    const matches = !!profiles[myProfile.name];
+    profileSelect.value = matches ? myProfile.name : '';
+    $('profile-delete').disabled = !matches;
+    // Save is always enabled when the name field has content — it creates
+    // a new profile if the name isn't saved yet, or overwrites otherwise.
+    $('profile-save').disabled = !($('name-input').value.trim());
   }
 
   profileSelect.addEventListener('change', () => {
     const selected = profileSelect.value;
-    if (!selected) { activeKey = null; saveActiveProfileKey(null); refreshProfileDropdown(); return; }
-    const profile = profiles[selected];
-    if (!profile) return;
+    if (!selected) {
+      // The "—" option just deselects — the editor keeps its current state.
+      saveActiveProfileName(null);
+      refreshProfileDropdown();
+      return;
+    }
+    const entry = profiles[selected];
+    if (!entry) return;
     myProfile = {
-      name: profile.name ?? 'Commander',
-      flag: sanitiseFlagConfig(profile.flag),
+      name: selected,
+      flag: sanitiseFlagConfig(entry.flag),
+      kingdomId: entry.kingdomId ?? null,
     };
-    activeKey = selected;
-    saveActiveProfileKey(activeKey);
+    saveActiveProfileName(selected);
     applyProfileToInputs();
     redrawPreview();
     refreshProfileDropdown();
@@ -229,36 +249,79 @@ function installProfileEditor() {
   });
 
   $('profile-save').addEventListener('click', () => {
-    if (!activeKey) return;
     readEditorIntoProfile();
-    saveProfile(activeKey, myProfile);
+    if (!myProfile.name) return;
+    saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId);
+    saveActiveProfileName(myProfile.name);
     profiles = loadAllProfiles();
-    refreshProfileDropdown();
-  });
-
-  $('profile-save-as').addEventListener('click', () => {
-    readEditorIntoProfile();
-    const suggested = activeKey || myProfile.name || 'My profile';
-    const name = window.prompt('Save profile as:', suggested);
-    if (!name) return;
-    const trimmed = name.trim().slice(0, 40);
-    if (!trimmed) return;
-    saveProfile(trimmed, myProfile);
-    profiles = loadAllProfiles();
-    activeKey = trimmed;
-    saveActiveProfileKey(activeKey);
     refreshProfileDropdown();
   });
 
   $('profile-delete').addEventListener('click', () => {
-    if (!activeKey) return;
-    if (!window.confirm('Delete profile "' + activeKey + '"?')) return;
-    deleteProfile(activeKey);
+    if (!profiles[myProfile.name]) return;
+    if (!window.confirm('Delete profile "' + myProfile.name + '"?')) return;
+    deleteProfile(myProfile.name);
+    saveActiveProfileName(null);
     profiles = loadAllProfiles();
-    activeKey = null;
-    saveActiveProfileKey(null);
     refreshProfileDropdown();
   });
+
+  // ── Kingdom picker ───────────────────────────────────────────────────
+  // Card-grid picker. "Random" is the first card and means the host picks a
+  // kingdom for this player at game start. Clicking a card writes its
+  // kingdom id (or null for Random) onto myProfile and auto-saves through
+  // the same onEditorChanged path the rest of the editor uses.
+  function installKingdomPicker() {
+    const root = $('kingdom-picker');
+    if (!root) return;
+    root.innerHTML = '';
+    const cards = [];
+    function addCard(kingdom) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'kingdom-card';
+      card.dataset.kingdomId = kingdom?.id ?? '';
+      const isRandom = !kingdom;
+      const accent = isRandom ? '#7d8aa1' : hexToCss(kingdom.accentColour ?? 0x888888);
+      card.style.borderLeftColor = accent;
+      const title = document.createElement('div');
+      title.className = 'kingdom-card-title';
+      title.textContent = isRandom ? 'Random' : kingdom.name;
+      card.appendChild(title);
+      const desc = document.createElement('div');
+      desc.className = 'kingdom-card-desc';
+      desc.textContent = isRandom
+        ? "Let the host pick a kingdom for you at game start."
+        : (kingdom.description ?? '');
+      card.appendChild(desc);
+      card.addEventListener('click', () => {
+        myProfile.kingdomId = kingdom?.id ?? null;
+        refreshKingdomPickerSelection();
+        // Persist + broadcast through the normal editor change path so the
+        // active profile (and connected clients) pick up the new kingdom.
+        if (profiles[myProfile.name]) {
+          saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId);
+          profiles = loadAllProfiles();
+          refreshProfileDropdown();
+        }
+        broadcastProfileIfInLobby();
+      });
+      root.appendChild(card);
+      cards.push(card);
+    }
+    addCard(null);
+    for (const kingdom of lobbyKingdoms()) addCard(kingdom);
+    refreshKingdomPickerSelection();
+  }
+
+  function refreshKingdomPickerSelection() {
+    const root = $('kingdom-picker');
+    if (!root) return;
+    const target = myProfile.kingdomId ?? '';
+    for (const card of root.querySelectorAll('.kingdom-card')) {
+      card.classList.toggle('selected', (card.dataset.kingdomId ?? '') === target);
+    }
+  }
 }
 
 function hexToCss(value) {
@@ -425,7 +488,6 @@ async function beginHostFromSave(saveId) {
 // ── Net bootstrap ───────────────────────────────────────────────────────────
 async function startHost() {
   myName = readName();
-  persistName(myName);
   setStatus('Connecting to peer network…');
   host = new HostNet();
   try {
@@ -515,7 +577,6 @@ async function startClient() {
   const code = extractRoomCode($('join-code').value);
   if (!code) { setStatus('Enter a room link or code first.'); return; }
   myName = readName();
-  persistName(myName);
   setStatus('Joining…');
   client = new ClientNet();
   try {
@@ -557,6 +618,57 @@ function enterWaiting() {
   renderWaiting();
 }
 
+// ── CPU player slots ───────────────────────────────────────────────────────
+// CPU players live in the same `lobby.players` array as human players, with
+// `isComputer: true` plus a generated id. The host owns their config (name,
+// kingdom, flag) and authors all their actions during play. CPU profile
+// flags default to a palette-derived flag keyed off the synthetic id so
+// they read as a distinct team on the map.
+
+function makeCpuId() {
+  return 'cpu-' + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+}
+
+function addCpuPlayer() {
+  const existingCpuCount = lobby.players.filter(p => p.isComputer).length;
+  const id = makeCpuId();
+  const name = 'CPU ' + (existingCpuCount + 1);
+  const profile = {
+    name,
+    flag: sanitiseFlagConfig(defaultFlagConfigFor(id)),
+    kingdomId: null,
+  };
+  lobby.players.push({
+    id, name, profile,
+    isComputer: true,
+    connected: true,
+  });
+  broadcastLobby();
+  renderWaiting();
+}
+
+function removeCpuPlayer(playerId) {
+  const idx = lobby.players.findIndex(p => p.id === playerId && p.isComputer);
+  if (idx < 0) return;
+  lobby.players.splice(idx, 1);
+  broadcastLobby();
+  renderWaiting();
+}
+
+function updateCpuPlayer(playerId, updates) {
+  const slot = lobby.players.find(p => p.id === playerId && p.isComputer);
+  if (!slot) return;
+  if (typeof updates.name === 'string') {
+    slot.name = updates.name.trim().slice(0, 16) || slot.name;
+    slot.profile = { ...slot.profile, name: slot.name };
+  }
+  if ('kingdomId' in updates) {
+    slot.profile = { ...slot.profile, kingdomId: updates.kingdomId ?? null };
+  }
+  broadcastLobby();
+  renderWaiting();
+}
+
 function renderWaiting() {
   $('room-code').textContent = roomUrl(roomCode);
   const list = $('player-list');
@@ -564,15 +676,62 @@ function renderWaiting() {
   lobby.players.forEach((player, index) => {
     const li = document.createElement('li');
     if (player.connected === false) li.classList.add('disconnected');
-    const color = PLAYER_COLORS[index % PLAYER_COLORS.length];
-    const tag = player.id === roomCode && mode === 'host' ? ' · Host'
-              : (mode === 'client' && index === 0 ? ' · Host' : '');
+    if (player.isComputer) li.classList.add('computer');
+    const tag = player.isComputer ? ' · CPU'
+      : (player.id === roomCode && mode === 'host' ? ' · Host'
+        : (mode === 'client' && index === 0 ? ' · Host' : ''));
     const you = player.id === myId ? ' (you)' : '';
-    li.innerHTML = `<span class="player-dot" style="background:${color}"></span>
-                    <strong>${escapeHtml(player.name)}</strong>${you}
+    li.innerHTML = `<canvas class="player-flag-icon" width="40" height="26"></canvas>
+                    <strong class="player-name">${escapeHtml(player.name)}</strong>${you}
                     <span class="meta">${tag}</span>`;
+    const iconCanvas = li.querySelector('canvas.player-flag-icon');
+    const flag = sanitiseFlagConfig(player.profile?.flag ?? defaultFlagConfigFor(player.id));
+    paintPreview(iconCanvas, flag);
+
+    // Host gets inline controls for CPU slots — rename, kingdom select, remove.
+    if (player.isComputer && mode === 'host') {
+      const controls = document.createElement('div');
+      controls.className = 'cpu-controls';
+      // Name input
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.maxLength = 16;
+      nameInput.value = player.name;
+      nameInput.className = 'cpu-name-input';
+      nameInput.addEventListener('change', () => updateCpuPlayer(player.id, { name: nameInput.value }));
+      controls.appendChild(nameInput);
+      // Kingdom select
+      const kingdomSelect = document.createElement('select');
+      kingdomSelect.className = 'cpu-kingdom-select';
+      const randomOption = document.createElement('option');
+      randomOption.value = '';
+      randomOption.textContent = 'Random kingdom';
+      kingdomSelect.appendChild(randomOption);
+      for (const kingdom of lobbyKingdoms()) {
+        const opt = document.createElement('option');
+        opt.value = kingdom.id;
+        opt.textContent = kingdom.name;
+        kingdomSelect.appendChild(opt);
+      }
+      kingdomSelect.value = player.profile?.kingdomId ?? '';
+      kingdomSelect.addEventListener('change', () => {
+        updateCpuPlayer(player.id, { kingdomId: kingdomSelect.value || null });
+      });
+      controls.appendChild(kingdomSelect);
+      // Remove button
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'small danger';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => removeCpuPlayer(player.id));
+      controls.appendChild(removeBtn);
+      li.appendChild(controls);
+    }
+
     list.appendChild(li);
   });
+  // Only the host gets the CPU add button.
+  const cpuControls = $('cpu-controls');
+  if (cpuControls) cpuControls.style.display = mode === 'host' ? '' : 'none';
   $('host-controls').style.display = mode === 'host' ? '' : 'none';
   // Settings rows are only meaningful for fresh games — a saved game carries
   // its own map dimensions + biome layout, and resuming should ignore the
@@ -603,6 +762,8 @@ function startHostSession() {
     playerId: p.id,
     name: p.name,
     profile: p.profile ?? null,
+    kingdomId: p.profile?.kingdomId ?? null,
+    isComputer: !!p.isComputer,
   }));
   const mapSize = pendingSaveSnapshot ? null : readSelectedMapSize();
   const biomeSettings = pendingSaveSnapshot ? null : readBiomeSettings();
@@ -640,6 +801,8 @@ function startClientSession() {
     playerId: p.id,
     name: p.name,
     profile: p.profile ?? null,
+    kingdomId: p.profile?.kingdomId ?? null,
+    isComputer: !!p.isComputer,
   }));
   gameSession = startGameSession({
     mode: 'client',
@@ -671,7 +834,6 @@ function setStatus(text) { const el = $('lobby-status'); if (el) el.textContent 
 function readName() {
   return ($('name-input')?.value || '').trim().slice(0, 16) || 'Commander';
 }
-function persistName(n) { try { localStorage.setItem('crossOverWarName', n); } catch {} }
 
 function roomUrl(code) {
   if (!code) return '';

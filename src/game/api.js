@@ -34,6 +34,7 @@ export {
   registerBiomeDecorator,
   registerWorldSpawner,
   registerEmblem,
+  registerKingdom,
   setBaseDecorator,
   declareAssetReference,
   spawnFromPrefab,
@@ -41,6 +42,8 @@ export {
   getActionType,
   getEmblem,
   listEmblems,
+  getKingdom,
+  listKingdoms,
 } from './ecs/registry.js';
 
 // ── Hex math ──────────────────────────────────────────────────────────────

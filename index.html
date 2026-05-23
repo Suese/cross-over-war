@@ -35,9 +35,8 @@
                 Saved profiles
                 <select id="profile-select"></select>
               </label>
-              <button id="profile-save" class="small" title="Save / overwrite the selected profile">Save</button>
-              <button id="profile-save-as" class="small" title="Save under a new name">Save as…</button>
-              <button id="profile-delete" class="small danger" title="Delete the selected profile">Delete</button>
+              <button id="profile-save" class="small" title="Save flag under the current name (creates a new profile or overwrites the matching one)">Save</button>
+              <button id="profile-delete" class="small danger" title="Delete the profile matching the current name">Delete</button>
             </div>
 
             <div class="flag-preview-row">
@@ -90,6 +89,11 @@
                 <input id="flag-emblem-colour" type="color" value="#d4a834" />
               </label>
             </div>
+
+            <div class="kingdom-section">
+              <div class="section-label">Kingdom</div>
+              <div id="kingdom-picker" class="kingdom-picker"></div>
+            </div>
           </div>
         </details>
 
@@ -128,6 +132,9 @@
         </div>
         <h3>Players</h3>
         <ul id="player-list"></ul>
+        <div id="cpu-controls" class="row" style="margin-bottom:8px">
+          <button id="add-cpu-btn" class="small">+ Add computer player</button>
+        </div>
         <div id="host-controls">
           <label id="map-size-row" class="setting-row">
             <span class="setting-label">Map size</span>

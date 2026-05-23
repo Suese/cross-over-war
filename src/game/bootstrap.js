@@ -15,6 +15,7 @@ import {
   applyChangeOps, addComponent, setChangeRecording,
 } from './ecs/world.js';
 import { playerColorCss, defaultFlagConfigFor } from './render/playerColors.js';
+import { paintFlagToCanvas } from './render/flagMesh.js';
 import { createRegistry, getTerrain } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
 import { createAssetLoader } from './modules/assetLoader.js';
@@ -77,11 +78,21 @@ export function startGameSession({
       //      remapping Ownership / fog / playerOrder along the way.
       gameRoom.loadFromSave(loadFromSnapshot);
       for (const player of lastKnownPlayers) {
-        gameRoom.addPlayer(player.playerId ?? player.id, player.name, player.profile ?? null);
+        gameRoom.addPlayer(
+          player.playerId ?? player.id,
+          player.name,
+          player.profile ?? null,
+          { kingdomId: player.kingdomId ?? null, isComputer: !!player.isComputer },
+        );
       }
     } else {
       for (const player of lastKnownPlayers) {
-        gameRoom.addPlayer(player.playerId ?? player.id, player.name, player.profile ?? null);
+        gameRoom.addPlayer(
+          player.playerId ?? player.id,
+          player.name,
+          player.profile ?? null,
+          { kingdomId: player.kingdomId ?? null, isComputer: !!player.isComputer },
+        );
       }
       gameRoom.startNewGame();
     }
@@ -136,7 +147,7 @@ export function startGameSession({
       // unexplored hexes either — the cursor stays default.
       if (exploredKeys && !exploredKeys.has(hex.q + ',' + hex.r)) {
         cursorHud.show(event.clientX, event.clientY,
-          '<span style="color:#ff8484">unknown</span>');
+          ['<span style="color:#ff8484">unknown</span>']);
         setCanvasCursor('');
         return;
       }
@@ -146,7 +157,7 @@ export function startGameSession({
         exploredKeys, blockedKeys, traversalModes,
       });
       if (!path || path.steps.length === 0) {
-        cursorHud.show(event.clientX, event.clientY, '·');
+        cursorHud.show(event.clientX, event.clientY, ['·']);
         setCanvasCursor('');
         return;
       }
@@ -165,34 +176,33 @@ export function startGameSession({
       const actionType = actionable
         ? viewerRegistry().actionTypes.get(actionable.actionTypeId)
         : null;
-      const actionLabel = actionType
-        ? ' <span style="opacity:0.7">·</span> <span style="color:#ffd964">'
+      const actionLine = actionType
+        ? '<span style="color:#ffd964">'
           + escapeHtml(actionType.icon ?? '')
           + (actionType.icon && actionType.label ? ' ' : '')
           + escapeHtml(actionType.label ?? '')
           + '</span>'
-        : '';
+        : null;
       // Conquest flag — shown for any Conquerable entity on the hex. The
       // owner's name comes through with the player's tint; unowned states
       // are still surfaced (grey flag + "Unclaimed") so the player can tell
       // a structure is takeable before walking up to it.
       const conquest = findConquerableInfoAt(viewerWorld(), hex.q, hex.r);
-      const conquestLabel = conquest
-        ? ' <span style="opacity:0.7">·</span> <span style="color:'
-          + conquest.color + '">⚑</span> '
+      const conquestLine = conquest
+        ? '<span style="color:' + conquest.color + '">⚑</span> '
           + (conquest.ownerName
               ? 'Owned by ' + escapeHtml(conquest.ownerName)
               : '<span style="opacity:0.7">Unclaimed</span>')
-        : '';
+        : null;
       setCanvasCursor(actionable ? 'pointer' : '');
+      const travelLine = '<span style="color:' + colour + '">'
+        + days + ' ' + dayWord
+        + '</span> <span style="opacity:0.7">·</span> '
+        + totalCost + ' mp';
       cursorHud.show(
         event.clientX,
         event.clientY,
-        '<span style="color:' + colour + '">' + days + ' ' + dayWord + '</span>'
-          + ' <span style="opacity:0.7">·</span> '
-          + totalCost + ' mp'
-          + actionLabel
-          + conquestLabel,
+        [travelLine, actionLine, conquestLine],
       );
     },
     onPlanPath: (hex) => {
@@ -513,7 +523,7 @@ export function startGameSession({
   function buildMapObjectSection({ typeName, typeDescription, conquerable, owner }) {
     const ownerLine = conquerable
       ? plainLine(
-          '<span style="color:' + owner.color + '">⚑</span> '
+          flagMarkerHtml(owner) + ' '
           + (owner.name
               ? 'Owned by <span style="color:' + owner.color + '">' + escapeHtml(owner.name) + '</span>'
               : '<span style="opacity:0.7">Unclaimed</span>')
@@ -523,6 +533,31 @@ export function startGameSession({
       ? '<div style="opacity:0.8; margin-top:4px">' + escapeHtml(typeDescription) + '</div>'
       : '';
     return sectionTitle(typeName, '#ffd964') + ownerLine + description;
+  }
+
+  // Render a small player-flag image (or a neutral grey square for unclaimed
+  // entities) for use inline in the right-click info panel. We paint into a
+  // throwaway canvas and embed the PNG as a data URL so the produced HTML is
+  // self-contained — the InfoOverlay receives the same `innerHTML` string it
+  // does for any other section. `vertical-align: -3px` lines the image up
+  // with the surrounding text baseline.
+  function flagMarkerHtml(owner) {
+    const w = 24, h = 16;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    if (owner?.ownerId) {
+      const player = lastKnownPlayers.find(p => (p.playerId ?? p.id) === owner.ownerId);
+      const flag = player?.profile?.flag ?? defaultFlagConfigFor(owner.ownerId);
+      paintFlagToCanvas(canvas, flag, viewerRegistry());
+    } else {
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#666';
+      ctx.fillRect(0, 0, w, h);
+    }
+    return '<img src="' + canvas.toDataURL('image/png')
+      + '" width="' + w + '" height="' + h
+      + '" style="vertical-align:-3px; border:1px solid rgba(0,0,0,0.45); border-radius:2px" alt="">';
   }
 
   function findMapObjectInfoAt(world, registry, q, r) {
@@ -540,6 +575,7 @@ export function startGameSession({
           ? lastKnownPlayers.find(p => (p.playerId ?? p.id) === ownerId)
           : null;
         owner = {
+          ownerId,
           name: ownerPlayer?.name ?? null,
           color: ownerId ? playerColorCss(ownerId) : '#888',
         };
@@ -781,7 +817,10 @@ export function startGameSession({
 
   function announceClientConnected(peerId, name, profile = null) {
     if (mode !== 'host' || !gameRoom) return;
-    gameRoom.addPlayer(peerId, name, profile);
+    gameRoom.addPlayer(peerId, name, profile, {
+      kingdomId: profile?.kingdomId ?? null,
+      isComputer: false,
+    });
     gameRoom.sendInitSnapshotTo(peerId);
   }
   function announceClientDisconnected(peerId) {

@@ -13,7 +13,7 @@
 // the preview canvas.
 
 import { createWorld } from './game/ecs/world.js';
-import { createRegistry, listEmblems } from './game/ecs/registry.js';
+import { createRegistry, listEmblems, listKingdoms } from './game/ecs/registry.js';
 import { loadAllModules } from './game/modules/moduleLoader.js';
 import { createAssetLoader } from './game/modules/assetLoader.js';
 import { sanitiseFlagConfig, paintFlagToCanvas, DEFAULT_FLAG_CONFIG } from './game/render/flagMesh.js';
@@ -42,15 +42,25 @@ export function lobbyEmblems() {
   return listEmblems(getLobbyRegistry());
 }
 
+export function lobbyKingdoms() {
+  return listKingdoms(getLobbyRegistry());
+}
+
 export function paintPreview(canvas, flagConfig) {
   paintFlagToCanvas(canvas, flagConfig, getLobbyRegistry());
 }
 
 // ── Profile storage ────────────────────────────────────────────────────────
-
-// Shape of a stored profile: { name: string, flag: FlagConfig }. The name
-// inside the profile is the *commander* name (what the player wants other
-// players to see), not the profile's storage key.
+//
+// Storage shape: `{ [commanderName]: { flag, kingdomId } }`. The commander
+// name and the profile key are the same string — that's the whole point of
+// the name/profile unification. Picking a profile from the dropdown sets
+// the player's name, flag, and kingdom together; clicking Save writes the
+// current flag + kingdom under the current name.
+//
+// Two legacy shapes migrate transparently on read:
+//   1. `{ [key]: { name, flag } }`  (pre-unification)        → use inner name as key
+//   2. `{ [name]: FlagConfig }`     (post-unification, pre-kingdom) → wrap, kingdomId: null
 
 export function loadAllProfiles() {
   try {
@@ -58,41 +68,62 @@ export function loadAllProfiles() {
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return {};
-    return parsed;
+    const out = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (value && typeof value === 'object' && 'flag' in value && !('colours' in value)) {
+        // Pre-unification or current-shape entry. The 'colours' check is how
+        // we tell apart "the value is a flag config" (current) from "the
+        // value is a wrapper { flag, kingdomId }" (new).
+        const name = String(value.name ?? key).trim().slice(0, 16) || key;
+        out[name] = {
+          flag: sanitiseFlagConfig(value.flag),
+          kingdomId: value.kingdomId ?? null,
+        };
+      } else {
+        // Bare flag config under the name key — wrap it.
+        out[key] = {
+          flag: sanitiseFlagConfig(value),
+          kingdomId: null,
+        };
+      }
+    }
+    return out;
   } catch {
     return {};
   }
 }
 
-export function saveProfile(profileKey, profile) {
-  if (!profileKey) return;
+export function saveProfile(name, flagConfig, kingdomId = null) {
+  const trimmed = String(name ?? '').trim().slice(0, 16);
+  if (!trimmed) return;
   const profiles = loadAllProfiles();
-  profiles[profileKey] = {
-    name: String(profile?.name ?? 'Commander').slice(0, 16),
-    flag: sanitiseFlagConfig(profile?.flag),
+  profiles[trimmed] = {
+    flag: sanitiseFlagConfig(flagConfig),
+    kingdomId: kingdomId ?? null,
   };
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles)); } catch {}
 }
 
-export function deleteProfile(profileKey) {
+export function deleteProfile(name) {
   const profiles = loadAllProfiles();
-  if (!(profileKey in profiles)) return;
-  delete profiles[profileKey];
+  if (!(name in profiles)) return;
+  delete profiles[name];
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles)); } catch {}
 }
 
-export function loadActiveProfileKey() {
+export function loadActiveProfileName() {
   try { return localStorage.getItem(ACTIVE_PROFILE_KEY) || null; } catch { return null; }
 }
 
-export function saveActiveProfileKey(profileKey) {
-  try { localStorage.setItem(ACTIVE_PROFILE_KEY, profileKey ?? ''); } catch {}
+export function saveActiveProfileName(name) {
+  try { localStorage.setItem(ACTIVE_PROFILE_KEY, name ?? ''); } catch {}
 }
 
 export function defaultLobbyProfile() {
   return {
     name: 'Commander',
     flag: { ...DEFAULT_FLAG_CONFIG, colours: [...DEFAULT_FLAG_CONFIG.colours] },
+    kingdomId: null,  // null = host picks at game start
   };
 }
 

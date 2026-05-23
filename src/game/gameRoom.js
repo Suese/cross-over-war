@@ -25,7 +25,7 @@ import {
   setComponentTracked, patchComponentTracked, createTrackedEntity,
   destroyTrackedEntity, destroyEntity,
 } from './ecs/world.js';
-import { createRegistry, getTerrain, spawnFromPrefab } from './ecs/registry.js';
+import { createRegistry, getTerrain, spawnFromPrefab, getKingdom, listKingdoms } from './ecs/registry.js';
 import { loadAllModules } from './modules/moduleLoader.js';
 import {
   recomputeFogForAllPlayers, ensurePlayerFogInitialised,
@@ -38,14 +38,13 @@ import { hexKey, hexDistance, hexesInRadius, HEX_DIRECTIONS } from './map/hex.js
 import { hashWorld, MESSAGE_KINDS } from './protocol.js';
 import { writeSave, newSaveId } from './persistence.js';
 
+// Fallback hero archetype pool, used when a kingdom doesn't supply enough
+// hero ids of its own (or when no kingdom resolved at all).
 const STARTING_HERO_ARCHETYPES = ['base/bob', 'base/alice', 'base/john', 'base/ringo'];
 const HEROES_PER_PLAYER = 2;
 const DEFAULT_MAP_DIMENSION = 64;
 const STARTING_MOVEMENT_MAX = 50;
 const DAYS_PER_WEEK = 7;
-// Castle prefab id used for player + neutral castles. For now everyone gets
-// the testing castle — the lobby will gain castle picking once we have more.
-const DEFAULT_CASTLE_PREFAB_ID = 'testing/castle';
 // Biome radius is derived from total biome count. Empirical trim — perfect
 // circular packing isn't possible on a hex grid, and we want a visible gap
 // of base-decorator territory between most biomes.
@@ -125,7 +124,12 @@ export class GameRoom {
   // ── Lobby plumbing ─────────────────────────────────────────────────────
   // Add a player. If a saved-but-disconnected slot has the same name, we
   // restore it instead of appending. Returns the slot's playerId.
-  addPlayer(connectingPlayerId, name, profile = null) {
+  //
+  // `options` (all optional):
+  //   kingdomId  — selected kingdom id, or null to let the host pick at start.
+  //   isComputer — true if the host owns this slot's actions (CPU player).
+  addPlayer(connectingPlayerId, name, profile = null, options = {}) {
+    const { kingdomId = null, isComputer = false } = options;
     const reusableSlot = this.players.find(p => !p.connected && p.name === name);
     if (reusableSlot) {
       // Map the saved hero(s) from the old id to the new id.
@@ -136,15 +140,27 @@ export class GameRoom {
       reusableSlot.playerId = connectingPlayerId;
       reusableSlot.connected = true;
       if (profile) reusableSlot.profile = profile;
+      if (kingdomId !== undefined) reusableSlot.kingdomId = kingdomId;
+      if (isComputer !== undefined) reusableSlot.isComputer = isComputer;
       this._publishPlayersChanged();
       return connectingPlayerId;
     }
     const existing = this.players.find(p => p.playerId === connectingPlayerId);
     if (existing) {
       if (profile) existing.profile = profile;
+      if (kingdomId !== undefined) existing.kingdomId = kingdomId;
+      if (isComputer !== undefined) existing.isComputer = isComputer;
       return connectingPlayerId;
     }
-    this.players.push({ playerId: connectingPlayerId, name, profile, connected: true, originalPlayerId: null });
+    this.players.push({
+      playerId: connectingPlayerId,
+      name,
+      profile,
+      kingdomId,
+      isComputer,
+      connected: true,
+      originalPlayerId: null,
+    });
     this._publishPlayersChanged();
     return connectingPlayerId;
   }
@@ -170,6 +186,12 @@ export class GameRoom {
   startNewGame() {
     if (this.started) return;
     this.started = true;
+
+    // Resolve each player's kingdom *once* before the spawn passes — a null
+    // kingdomId in the lobby payload means "host picks randomly", so we lock
+    // it in here. Spawn code reads `player.resolvedKingdomId` from this point
+    // forward.
+    this._resolvePlayerKingdoms();
 
     // PASS 1 — base terrain (deep-ocean / plains / dusty-hills) from perlin
     const tiles = this._passOneTerrain();
@@ -210,6 +232,10 @@ export class GameRoom {
     // init_snapshot, not deltas.
     consumePendingChanges(this.world);
     this._persistToLocalStorage();
+
+    // If the very first player happens to be a CPU, end their turn(s) for
+    // them — this re-uses the same chain that runs after every action.
+    this._tickCpuTurnsIfActive();
   }
 
   // ── Pass 1 ──────────────────────────────────────────────────────────────
@@ -224,6 +250,27 @@ export class GameRoom {
     });
     invalidateTileIndex(this.world);
     return tiles;
+  }
+
+  // Resolve each player's kingdom up-front. Players who left it on
+  // "Random" in the lobby get a kingdom assigned here from whatever modules
+  // registered. If no kingdoms are registered at all, this stays null and
+  // the spawn code falls back to its baked-in defaults.
+  _resolvePlayerKingdoms() {
+    const allKingdoms = listKingdoms(this.registry);
+    if (allKingdoms.length === 0) {
+      for (const player of this.players) player.resolvedKingdomId = null;
+      return;
+    }
+    for (const player of this.players) {
+      const requested = player.kingdomId;
+      if (requested && getKingdom(this.registry, requested)) {
+        player.resolvedKingdomId = requested;
+      } else {
+        const pick = allKingdoms[Math.floor(Math.random() * allKingdoms.length)];
+        player.resolvedKingdomId = pick.id;
+      }
+    }
   }
 
   // ── Pass 2 ──────────────────────────────────────────────────────────────
@@ -261,6 +308,14 @@ export class GameRoom {
       return resolveTerrainCost(terrain, ['Land']) != null;
     };
 
+    const registeredKingdoms = listKingdoms(this.registry);
+    // Castle prefab ids fall back to the first registered kingdom's castle
+    // when a player's kingdom is null *and* no kingdoms exist at all
+    // (legacy / test setups). Modules normally register at least one.
+    if (registeredKingdoms.length === 0) {
+      throw new Error('no kingdoms registered — at least one kingdom module must register a castle prefab');
+    }
+
     // ── Owned castles ────────────────────────────────────────────────────
     const placedCastles = [];
     const ownedCastles = [];
@@ -273,13 +328,16 @@ export class GameRoom {
       };
       const spawn = this._findCastleSpawn(tiles, isWalkableLand, preferred, castleSeparation, placedCastles);
       if (!spawn) { this.log('no castle spawn for player ' + this.players[i].playerId); continue; }
-      const castleEntityId = spawnFromPrefab(this.registry, DEFAULT_CASTLE_PREFAB_ID, this.world, {
+      const kingdom = getKingdom(this.registry, this.players[i].resolvedKingdomId)
+        ?? registeredKingdoms[0];
+      const castleEntityId = spawnFromPrefab(this.registry, kingdom.castlePrefabId, this.world, {
         q: spawn.q, r: spawn.r, playerId: this.players[i].playerId,
       });
-      this._stampBiomeRadius(castleEntityId, castleRadius);
+      this._stampBiomeAnchor(castleEntityId, kingdom.primaryBiomeId, castleRadius);
       const record = {
         entityId: castleEntityId, q: spawn.q, r: spawn.r,
         radius: castleRadius, playerId: this.players[i].playerId, playerIndex: i,
+        kingdomId: kingdom.id,
       };
       placedCastles.push(record);
       ownedCastles.push(record);
@@ -289,20 +347,27 @@ export class GameRoom {
     for (let i = 0; i < totalCastles - numPlayers; i++) {
       const spawn = this._findNeutralCastleSpawn(tiles, isWalkableLand, castleSeparation, placedCastles);
       if (!spawn) break;
-      const castleEntityId = spawnFromPrefab(this.registry, DEFAULT_CASTLE_PREFAB_ID, this.world, {
+      const kingdom = registeredKingdoms[Math.floor(Math.random() * registeredKingdoms.length)];
+      const castleEntityId = spawnFromPrefab(this.registry, kingdom.castlePrefabId, this.world, {
         q: spawn.q, r: spawn.r,
       });
-      this._stampBiomeRadius(castleEntityId, castleRadius);
-      placedCastles.push({ entityId: castleEntityId, q: spawn.q, r: spawn.r, radius: castleRadius, playerId: null });
+      this._stampBiomeAnchor(castleEntityId, kingdom.primaryBiomeId, castleRadius);
+      placedCastles.push({
+        entityId: castleEntityId, q: spawn.q, r: spawn.r,
+        radius: castleRadius, playerId: null, kingdomId: kingdom.id,
+      });
     }
 
     // ── Additional biome anchors ────────────────────────────────────────
     // Placed in tiles outside any castle's radius so they never overlap
-    // castle biomes. Each anchor gets a random radius between 0.5x and 2x
-    // the castle radius.
+    // castle biomes. Each anchor's decorator is drawn from kingdom secondary
+    // biome ids — these are the "wild" biomes a kingdom contributes to the
+    // map outside its own capital region.
     const placedAdditional = [];
-    const decoratorIds = Array.from(this.registry.biomeDecorators.keys());
-    if (decoratorIds.length > 0) {
+    const secondaryDecoratorIds = registeredKingdoms
+      .map(k => k.secondaryBiomeId)
+      .filter(Boolean);
+    if (secondaryDecoratorIds.length > 0) {
       for (let attempt = 0; attempt < ADDITIONAL_BIOME_PLACEMENT_ATTEMPTS && placedAdditional.length < numAdditional; attempt++) {
         const candidate = tiles[Math.floor(Math.random() * tiles.length)];
         if (!isWalkableLand(candidate.q, candidate.r)) continue;
@@ -321,7 +386,7 @@ export class GameRoom {
         if (!valid) continue;
         const scale = ADDITIONAL_BIOME_MIN_SCALE + Math.random() * (ADDITIONAL_BIOME_MAX_SCALE - ADDITIONAL_BIOME_MIN_SCALE);
         const radius = Math.max(3, Math.floor(castleRadius * scale));
-        const decoratorId = decoratorIds[Math.floor(Math.random() * decoratorIds.length)];
+        const decoratorId = secondaryDecoratorIds[Math.floor(Math.random() * secondaryDecoratorIds.length)];
         const anchorEntityId = createEntity(this.world);
         addComponent(this.world, anchorEntityId, 'Position', { q: candidate.q, r: candidate.r });
         addComponent(this.world, anchorEntityId, 'BiomeAnchor', { decoratorId, radius });
@@ -366,9 +431,14 @@ export class GameRoom {
     };
   }
 
-  _stampBiomeRadius(anchorEntityId, radius) {
+  // Override the BiomeAnchor's decorator id and radius post-spawn. The
+  // castle prefab itself bakes in a default decoratorId, but the kingdom
+  // picker means the runtime selection wins.
+  _stampBiomeAnchor(anchorEntityId, decoratorId, radius) {
     const anchor = getComponent(this.world, anchorEntityId, 'BiomeAnchor');
-    if (anchor) anchor.radius = radius;
+    if (!anchor) return;
+    if (decoratorId) anchor.decoratorId = decoratorId;
+    if (typeof radius === 'number') anchor.radius = radius;
   }
 
   _findCastleSpawn(tiles, isWalkableLand, preferred, separation, placed) {
@@ -415,9 +485,12 @@ export class GameRoom {
 
     const heroTakenKeys = new Set();
     for (const castle of ownedCastles) {
-      const spawns = this._findHeroSpawnsAroundCastle(castle, tilesByKey, overridesByKey, heroTakenKeys, HEROES_PER_PLAYER);
+      const kingdom = getKingdom(this.registry, castle.kingdomId);
+      const bonus = kingdom?.bonus ?? {};
+      const heroCount = HEROES_PER_PLAYER + (bonus.heroCountBonus ?? 0);
+      const spawns = this._findHeroSpawnsAroundCastle(castle, tilesByKey, overridesByKey, heroTakenKeys, heroCount);
       for (let i = 0; i < spawns.length; i++) {
-        this._spawnPlayerHero(castle.playerId, castle.playerIndex, i, spawns[i]);
+        this._spawnPlayerHero(castle.playerId, castle.playerIndex, i, spawns[i], kingdom);
         heroTakenKeys.add(hexKey(spawns[i].q, spawns[i].r));
       }
     }
@@ -721,26 +794,30 @@ export class GameRoom {
     setChangeRecording(this.world, true);
   }
 
-  _spawnPlayerHero(playerId, playerIndex, heroSlotIndex, spawn) {
+  _spawnPlayerHero(playerId, playerIndex, heroSlotIndex, spawn, kingdom) {
     // Setup-time spawn — mutations during startNewGame() are discarded from
     // the change buffer because clients pull the initial state from
     // init_snapshot, not deltas. We use the registry prefab directly here.
     //
-    // Archetype assignment is (playerIndex * HEROES_PER_PLAYER + heroSlotIndex)
-    // mod the archetype list, so a 2-player / 2-hero game gives player 0
-    // Bob + Alice and player 1 John + Ringo. Players past archetype count
-    // wrap around and reuse names — acceptable at high player counts.
-    const archetypeOffset = playerIndex * HEROES_PER_PLAYER + heroSlotIndex;
-    const archetypeId = STARTING_HERO_ARCHETYPES[archetypeOffset % STARTING_HERO_ARCHETYPES.length];
+    // Hero archetype pool comes from the player's kingdom when available;
+    // otherwise the base/* fallbacks. Hero slot index just walks the pool
+    // (wrapping if needed).
+    const pool = (kingdom?.heroIds && kingdom.heroIds.length)
+      ? kingdom.heroIds
+      : STARTING_HERO_ARCHETYPES;
+    const archetypeId = pool[heroSlotIndex % pool.length];
     const archetype = this.registry.heroes.get(archetypeId);
+    if (!archetype) throw new Error('missing hero archetype: ' + archetypeId);
+    const bonus = kingdom?.bonus ?? {};
+    const movementMax = STARTING_MOVEMENT_MAX + (bonus.movementMaxBonus ?? 0);
     const heroParams = {
       ...archetype.defaults,
       name: archetype.name,
       playerId,
       q: spawn.q,
       r: spawn.r,
-      movementMax: STARTING_MOVEMENT_MAX,
-      movementLeft: STARTING_MOVEMENT_MAX,
+      movementMax,
+      movementLeft: movementMax,
     };
     return spawnFromPrefab(this.registry, archetype.prefabId, this.world, heroParams);
   }
@@ -797,6 +874,30 @@ export class GameRoom {
         this.log('unknown action: ' + action.name);
     }
     this._publishDelta(events);
+    // CPU stub — if a turn change put a CPU into the active slot, end their
+    // turn for them immediately so the game keeps progressing. This loops
+    // synchronously through consecutive CPU slots; players will see one
+    // re-render after all the CPUs in the chain have ended their turns.
+    this._tickCpuTurnsIfActive();
+  }
+
+  // If the current active player is a CPU, dispatch end_turn on their behalf.
+  // The recursion bottoms out when the next current player is a human (or
+  // the game enters a vanquished/ended state).
+  _tickCpuTurnsIfActive(maxIterations = 32) {
+    for (let i = 0; i < maxIterations; i++) {
+      const stateEntityId = getWorldState(this.world);
+      const worldState = getComponent(this.world, stateEntityId, 'WorldState');
+      if (!worldState || worldState.phase !== 'playing') return;
+      const current = this.players[worldState.currentPlayerIndex];
+      if (!current || !current.isComputer || current.vanquished) return;
+      // Avoid re-entering handleAction's broadcaster — dispatch the end_turn
+      // path directly, then publish that delta ourselves.
+      const events = [];
+      this._endTurn(current.playerId, { name: 'end_turn' }, events);
+      this._publishDelta(events);
+    }
+    this.log('cpu turn loop hit iteration cap — bailing');
   }
 
   _planPath(playerId, action, events) {

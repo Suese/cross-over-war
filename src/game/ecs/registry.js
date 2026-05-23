@@ -17,6 +17,7 @@ export function createRegistry() {
     worldSpawners: [],      // [(context) => void] — invoked once after biomes + base decorator
     assetReferences: [],    // [{ moduleName, kind, id, path }] — for audit
     emblems: new Map(),     // id → { id, name, draw(ctx, size, colourHex) } — flag emblems
+    kingdoms: new Map(),    // id → kingdom definition (see registerKingdom)
   };
 }
 
@@ -153,4 +154,39 @@ export function getEmblem(registry, emblemId) {
 
 export function listEmblems(registry) {
   return Array.from(registry.emblems.values());
+}
+
+// Register a kingdom — the player-facing "faction" the lobby picker chooses
+// from. A kingdom bundles together:
+//   id              : string  (e.g. 'pipe-dream/kingdom')
+//   name            : string  shown on the picker card
+//   description     : string  short blurb on hover / selection
+//   accentColour    : number  24-bit RGB tint used for the picker card bar
+//   castlePrefabId  : string  prefab that spawns at the player's capital
+//   primaryBiomeId  : string  biome decorator that paints the castle's hexes
+//   secondaryBiomeId: string  decorator the engine can pick for additional
+//                             (non-castle) biome anchors. Optional — leave
+//                             unset to keep this kingdom out of the
+//                             additional-biome pool.
+//   heroIds         : string[] hero archetype ids in spawn order. The first
+//                             entry seeds player 0's first hero, etc.
+//                             Falls back to base/* archetypes when missing.
+//   bonus           : { kind, value, ... } — applied to spawned heroes /
+//                             gameplay. Shape interpreted by gameRoom.
+export function registerKingdom(registry, definition) {
+  if (!definition.id) throw new Error('registerKingdom: id required');
+  if (!definition.castlePrefabId) throw new Error('registerKingdom: castlePrefabId required');
+  if (!definition.primaryBiomeId) throw new Error('registerKingdom: primaryBiomeId required');
+  if (registry.kingdoms.has(definition.id)) {
+    throw new Error('kingdom id already registered: ' + definition.id);
+  }
+  registry.kingdoms.set(definition.id, definition);
+}
+
+export function getKingdom(registry, kingdomId) {
+  return registry.kingdoms.get(kingdomId) ?? null;
+}
+
+export function listKingdoms(registry) {
+  return Array.from(registry.kingdoms.values());
 }

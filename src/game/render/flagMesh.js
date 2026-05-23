@@ -35,8 +35,11 @@ import { getEmblem } from '../ecs/registry.js';
 
 const POLE_HEIGHT = 0.75;
 const POLE_RADIUS = 0.025;
-const CLOTH_WIDTH = 0.50;
-const CLOTH_HEIGHT = 0.32;
+// Cloth doubled from its original 0.50 × 0.32 — the smaller size read as a
+// pin from a normal camera distance, so heroes / POI flags now match the
+// scale of the flag editor's preview canvas.
+const CLOTH_WIDTH = 1.00;
+const CLOTH_HEIGHT = 0.64;
 // In-game cloth texture matches the cloth's aspect ratio so the stripes /
 // emblem don't get stretched when mapped onto the plane.
 const FLAG_TEXTURE_WIDTH = 200;
