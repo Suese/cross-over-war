@@ -260,6 +260,7 @@ export default {
       secondaryBiomeId: SECONDARY_BIOME_ID,
       heroIds: HERO_IDS,
       defaultHeroModelKey: 'pipe-dream/hero-joe.glb',
+      wallTerrainId: PASTRY_MOUNTAINS_ID,
       bonus: { movementMaxBonus: 30 },
     });
   },

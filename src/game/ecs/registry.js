@@ -195,6 +195,11 @@ export function listEmblems(registry) {
 //                             time is: archetype modelKey → kingdom
 //                             defaultHeroModelKey → prefab fallback
 //                             ('base/hero.glb').
+//   wallTerrainId   : string (optional) — terrain id the biome-walls pass
+//                             uses to seal this kingdom's biome. Lets a
+//                             themed kingdom (e.g. pipe-dream) ring its
+//                             land with its own mountain art instead of
+//                             the base 'mountain' terrain.
 //   bonus           : { kind, value, ... } — applied to spawned heroes /
 //                             gameplay. Shape interpreted by gameRoom.
 export function registerKingdom(registry, definition) {

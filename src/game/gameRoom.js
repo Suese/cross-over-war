@@ -66,10 +66,19 @@ const ADDITIONAL_BIOME_PLACEMENT_ATTEMPTS = 60;
 const BIOME_WALL_MIN = 0.5;
 const BIOME_WALL_MAX = 0.9;
 const BIOME_WALL_NOISE_SCALE = 0.22;
-// Total thickness of the mountain band across the biome boundary, split
-// evenly between hexes inside the biome and hexes outside it. 2 = 1 hex in
-// + 1 hex out; 4 = 2 + 2. Odd values lean one ring outward.
-const BIOME_WALL_THICKNESS = 2;
+// Local thickness range — each hex samples a slow noise field that decides
+// how far from the biome boundary the wall reaches at that point. The same
+// threshold applies on both sides, so total band width varies between
+// 2 * MIN and 2 * MAX hexes across the map (segments of thick range
+// alternating with passable saddles).
+const BIOME_WALL_THICKNESS_MIN = 1;
+const BIOME_WALL_THICKNESS_MAX = 3;
+const BIOME_WALL_THICKNESS_NOISE_SCALE = 0.06;
+// Coast wall — a biome's land tile that sits adjacent to ocean has a
+// chance to become its kingdom's mountain terrain. Capped at 1 hex deep
+// (the shoreline rim only) and rolled at its own lower density so cliffs
+// read as occasional headlands, not a continuous sea wall.
+const BIOME_COAST_DENSITY = 0.4;
 
 // Road-carver cost constants. The inter-biome carver picks the lowest-cost
 // path through workable terrain by default; the water cost lets it route
@@ -459,66 +468,141 @@ export class GameRoom {
   }
 
   // ── Pass 2.5 ────────────────────────────────────────────────────────────
-  // Wall the biomes off with mountains, threading the band across the
-  // boundary itself. Hexes are wall candidates when they sit within
-  // `inwardRings` of a non-biome hex (inner rim of the biome) or within
-  // `outwardRings` of a biome hex (outer rim outside the biome). Each
-  // candidate rolls a fractal-noise sample; samples below the per-map
-  // closure density flip the tile to 'mountain'. The result is a
-  // partially-broken ring straddling the biome edge — players still find
-  // passes through, and the kingdom reads as a closed pocket.
+  // Wall the biomes off with mountains. Three things happen here, all
+  // gated by the same per-map closure density and a shared fractal noise:
   //
-  // Density is rolled randomly per map in [BIOME_WALL_MIN, BIOME_WALL_MAX].
-  // Ocean tiles are exempt — the wall is a land-only feature.
+  //   1. Boundary band. Hexes within `localThickness` of a biome boundary
+  //      are wall candidates. localThickness comes from a slow noise field
+  //      so the band naturally swells and tapers along the boundary
+  //      (saddles + ridges, not a uniform ring). MIN/MAX rings on each
+  //      side give a total band width of 2..6 hexes.
+  //
+  //   2. Coast walls. A biome land hex that touches ocean is a 1-thick
+  //      coast candidate. Rolled against a lower density (BIOME_COAST_DENSITY)
+  //      so cliffs read as occasional headlands rather than a continuous
+  //      sea wall.
+  //
+  //   3. Themed terrain. Each candidate's nearest biome anchor's kingdom
+  //      contributes a `wallTerrainId` — pipe-dream's coast / boundary uses
+  //      pastry-mountains; kingdoms without an override fall back to base
+  //      'mountain'. Outside-biome candidates inherit the nearest biome's
+  //      mountain art so the outer ring stays on theme.
   _passBiomeWalls(biomeContext) {
     const { biomeHexesByAnchor, unassignedHexes } = biomeContext;
     if (!biomeHexesByAnchor || biomeHexesByAnchor.size === 0) return;
 
     const density = BIOME_WALL_MIN + Math.random() * (BIOME_WALL_MAX - BIOME_WALL_MIN);
-    const noise = createSeededNoise2D(this.seed + 8849);
-    // Split the band evenly across the boundary. Odd thickness leans outward
-    // (more wild-side mountains than biome-interior mountains), which keeps
-    // the biome decorator's own art mostly intact.
-    const inwardRings = Math.floor(BIOME_WALL_THICKNESS / 2);
-    const outwardRings = Math.ceil(BIOME_WALL_THICKNESS / 2);
+    const closureNoise = createSeededNoise2D(this.seed + 8849);
+    const thicknessNoise = createSeededNoise2D(this.seed + 12347);
 
-    // Fast lookup of every hex that belongs to any biome.
+    // Fast lookup of every hex that belongs to any biome, plus a reverse
+    // map back to its anchor entity for kingdom-aware terrain choice.
     const biomeHexKeys = new Set();
+    const hexKeyToAnchor = new Map();
     const allBiomeHexes = [];
-    for (const hexes of biomeHexesByAnchor.values()) {
+    for (const [anchorEntityId, hexes] of biomeHexesByAnchor.entries()) {
       for (const hex of hexes) {
-        biomeHexKeys.add(hexKey(hex.q, hex.r));
+        const key = hexKey(hex.q, hex.r);
+        biomeHexKeys.add(key);
+        hexKeyToAnchor.set(key, anchorEntityId);
         allBiomeHexes.push(hex);
       }
     }
 
-    const applyWall = (hex, ringRadius, nearbyMustBeBiome) => {
-      // ringRadius==0 short-circuit: a hex itself counts as "near boundary"
-      // only when it's adjacent (ringRadius >= 1). Zero means no inward (or
-      // outward) band on this side at all.
-      if (ringRadius <= 0) return;
-      let nearBoundary = false;
-      for (const ringHex of hexesInRadius(hex.q, hex.r, ringRadius)) {
-        const inBiome = biomeHexKeys.has(hexKey(ringHex.q, ringHex.r));
-        if (inBiome === nearbyMustBeBiome) {
-          nearBoundary = true;
-          break;
-        }
-      }
-      if (!nearBoundary) return;
-      const tile = getComponent(this.world, hex.entityId, 'Tile');
-      if (!tile) return;
-      if (tile.terrainId !== 'plains' && tile.terrainId !== 'rocky-hills') return;
-      const sample = fractalNoise2D(noise, hex.q * BIOME_WALL_NOISE_SCALE, hex.r * BIOME_WALL_NOISE_SCALE, 3, 0.55, 2.0);
+    // Tile index for quick "is my neighbour ocean?" checks — built once,
+    // dropped at end of pass.
+    const tileByKey = new Map();
+    forEachEntityWith(this.world, ['Tile'], (_id, tile) => {
+      tileByKey.set(hexKey(tile.q, tile.r), tile);
+    });
+
+    // Resolve each anchor's wall terrain by following BiomeAnchor →
+    // decoratorId → kingdom. Kingdoms without `wallTerrainId` fall back to
+    // base 'mountain'. Reverse map lets additional-biome anchors share
+    // their parent kingdom's theme.
+    const kingdomByDecoratorId = new Map();
+    for (const kingdom of listKingdoms(this.registry)) {
+      if (kingdom.primaryBiomeId) kingdomByDecoratorId.set(kingdom.primaryBiomeId, kingdom);
+      if (kingdom.secondaryBiomeId) kingdomByDecoratorId.set(kingdom.secondaryBiomeId, kingdom);
+    }
+    const wallTerrainByAnchor = new Map();
+    for (const anchorEntityId of biomeHexesByAnchor.keys()) {
+      const biomeAnchor = getComponent(this.world, anchorEntityId, 'BiomeAnchor');
+      const kingdom = biomeAnchor ? kingdomByDecoratorId.get(biomeAnchor.decoratorId) : null;
+      wallTerrainByAnchor.set(anchorEntityId, kingdom?.wallTerrainId ?? 'mountain');
+    }
+
+    const localThickness = (q, r) => {
+      const sample = fractalNoise2D(
+        thicknessNoise,
+        q * BIOME_WALL_THICKNESS_NOISE_SCALE,
+        r * BIOME_WALL_THICKNESS_NOISE_SCALE,
+        3, 0.55, 2.0,
+      );
       const normalised = (sample + 1) * 0.5;
-      if (normalised < density) tile.terrainId = 'mountain';
+      return Math.round(
+        BIOME_WALL_THICKNESS_MIN + normalised * (BIOME_WALL_THICKNESS_MAX - BIOME_WALL_THICKNESS_MIN),
+      );
+    };
+    const isOceanTerrain = (terrainId) =>
+      terrainId === 'deep-ocean' || terrainId === 'shallow-ocean';
+    const closureGate = (q, r, gateDensity) => {
+      const sample = fractalNoise2D(
+        closureNoise,
+        q * BIOME_WALL_NOISE_SCALE,
+        r * BIOME_WALL_NOISE_SCALE,
+        3, 0.55, 2.0,
+      );
+      return ((sample + 1) * 0.5) < gateDensity;
     };
 
-    // Inner band — biome hexes whose neighbourhood includes a non-biome tile.
-    for (const hex of allBiomeHexes) applyWall(hex, inwardRings, false);
-    // Outer band — unassigned hexes whose neighbourhood includes a biome tile.
+    // Walk every hex on the map once. The candidate state for each hex is
+    // determined by its distance to the nearest opposite-type neighbour
+    // and (for biome land hexes) whether it touches ocean.
+    const considerHex = (hex, isBiome) => {
+      const tile = tileByKey.get(hexKey(hex.q, hex.r));
+      if (!tile) return;
+      if (tile.terrainId !== 'plains' && tile.terrainId !== 'rocky-hills') return;
+
+      let nearestOppositeDistance = Infinity;
+      let nearestBiomeAnchor = isBiome ? hexKeyToAnchor.get(hexKey(hex.q, hex.r)) : null;
+      let nearestBiomeDistance = Infinity;
+      for (const ringHex of hexesInRadius(hex.q, hex.r, BIOME_WALL_THICKNESS_MAX)) {
+        if (ringHex.q === hex.q && ringHex.r === hex.r) continue;
+        const d = hexDistance({ q: hex.q, r: hex.r }, ringHex);
+        const inBiome = biomeHexKeys.has(hexKey(ringHex.q, ringHex.r));
+        if (inBiome !== isBiome && d < nearestOppositeDistance) nearestOppositeDistance = d;
+        if (!isBiome && inBiome && d < nearestBiomeDistance) {
+          nearestBiomeDistance = d;
+          nearestBiomeAnchor = hexKeyToAnchor.get(hexKey(ringHex.q, ringHex.r));
+        }
+      }
+
+      const thickness = localThickness(hex.q, hex.r);
+      const inBoundaryBand = nearestOppositeDistance <= thickness;
+
+      // Coast rule applies only to biome land hexes adjacent to ocean.
+      let isCoast = false;
+      if (isBiome) {
+        for (const direction of HEX_DIRECTIONS) {
+          const neighbour = tileByKey.get(hexKey(hex.q + direction.q, hex.r + direction.r));
+          if (neighbour && isOceanTerrain(neighbour.terrainId)) { isCoast = true; break; }
+        }
+      }
+
+      let qualifies = false;
+      if (inBoundaryBand && closureGate(hex.q, hex.r, density)) qualifies = true;
+      else if (isCoast && closureGate(hex.q, hex.r, BIOME_COAST_DENSITY)) qualifies = true;
+      if (!qualifies) return;
+
+      const wallTerrain = (nearestBiomeAnchor && wallTerrainByAnchor.get(nearestBiomeAnchor))
+        ?? 'mountain';
+      tile.terrainId = wallTerrain;
+    };
+
+    for (const hex of allBiomeHexes) considerHex(hex, true);
     if (unassignedHexes) {
-      for (const hex of unassignedHexes) applyWall(hex, outwardRings, true);
+      for (const hex of unassignedHexes) considerHex(hex, false);
     }
   }
 
