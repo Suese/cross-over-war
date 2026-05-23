@@ -6,3 +6,7 @@ dist
 .env
 .env.local
 .env.*.local
+
+# Blender autosave/backup files (keep .blend tracked)
+*.blend[0-9]
+*.blend[0-9][0-9]
