@@ -35,6 +35,7 @@ import { generateMap } from './map/mapgen.js';
 import { findPath, invalidateTileIndex } from './map/pathfinding.js';
 import { collectTraversalModes, resolveTerrainCost, resolveWorkableCost } from './ecs/traversal.js';
 import { hexKey, hexDistance, hexesInRadius, HEX_DIRECTIONS } from './map/hex.js';
+import { createSeededNoise2D, fractalNoise2D } from './map/perlin.js';
 import { hashWorld, MESSAGE_KINDS } from './protocol.js';
 import { writeSave, newSaveId } from './persistence.js';
 
@@ -56,6 +57,15 @@ const CASTLE_RADIUS_FLOOR = 5;
 const ADDITIONAL_BIOME_MIN_SCALE = 0.5;
 const ADDITIONAL_BIOME_MAX_SCALE = 2.0;
 const ADDITIONAL_BIOME_PLACEMENT_ATTEMPTS = 60;
+
+// Mountain walls that ring every biome. Each map rolls a closure density in
+// [BIOME_WALL_MIN, BIOME_WALL_MAX]; unassigned hexes adjacent to any biome
+// then sample a fractal noise field, and tiles whose noise sample falls
+// below the density become 'mountain'. 0.5 → roughly half the perimeter is
+// mountain (most open); 0.9 → roughly nine in ten (most closed).
+const BIOME_WALL_MIN = 0.5;
+const BIOME_WALL_MAX = 0.9;
+const BIOME_WALL_NOISE_SCALE = 0.22;
 
 // Road-carver cost constants. The inter-biome carver picks the lowest-cost
 // path through workable terrain by default; the water cost lets it route
@@ -205,6 +215,12 @@ export class GameRoom {
 
     // PASS 2 — castles + additional biome anchors + tile→anchor assignment
     const biomeContext = this._passTwoBiomes(tiles);
+
+    // PASS 2.5 — biome perimeter walls. Unassigned hexes adjacent to a
+    // biome get rolled against a fractal noise field; tiles that pass
+    // become 'mountain', sealing the biome off with a partially-broken
+    // ring. Closure density is rolled per-map within [50%, 90%].
+    this._passBiomeWalls(biomeContext);
 
     // Heroes spawn between passes so the decorator can avoid hero hexes.
     this._spawnHeroesAtCastles(biomeContext.ownedCastles);
@@ -436,6 +452,49 @@ export class GameRoom {
       unassignedHexes,
       castleRadius,
     };
+  }
+
+  // ── Pass 2.5 ────────────────────────────────────────────────────────────
+  // Wall the biomes off with mountains. Walks every unassigned hex; any hex
+  // that neighbours a biome-assigned tile rolls against a fractal-noise
+  // field. Tiles whose normalised noise sample is below the per-map closure
+  // density become 'mountain'. The result is a partially-broken ring of
+  // mountains separating the biome interior from the wild map — players
+  // still find passes through but the biome reads as a closed pocket.
+  //
+  // Density is rolled randomly per map in [BIOME_WALL_MIN, BIOME_WALL_MAX].
+  // Ocean tiles are exempt — the wall is a land-only feature.
+  _passBiomeWalls(biomeContext) {
+    const { biomeHexesByAnchor, unassignedHexes } = biomeContext;
+    if (!unassignedHexes || unassignedHexes.length === 0) return;
+
+    const density = BIOME_WALL_MIN + Math.random() * (BIOME_WALL_MAX - BIOME_WALL_MIN);
+    const noise = createSeededNoise2D(this.seed + 8849);
+
+    // Fast lookup of every hex that belongs to any biome.
+    const biomeHexKeys = new Set();
+    for (const hexes of biomeHexesByAnchor.values()) {
+      for (const hex of hexes) biomeHexKeys.add(hexKey(hex.q, hex.r));
+    }
+
+    for (const hex of unassignedHexes) {
+      // Only hexes that touch a biome are candidates for the wall.
+      let touchesBiome = false;
+      for (const direction of HEX_DIRECTIONS) {
+        if (biomeHexKeys.has(hexKey(hex.q + direction.q, hex.r + direction.r))) {
+          touchesBiome = true;
+          break;
+        }
+      }
+      if (!touchesBiome) continue;
+      const tile = getComponent(this.world, hex.entityId, 'Tile');
+      if (!tile) continue;
+      // Walls land on dry hexes only — leave the sea alone.
+      if (tile.terrainId !== 'plains' && tile.terrainId !== 'rocky-hills') continue;
+      const sample = fractalNoise2D(noise, hex.q * BIOME_WALL_NOISE_SCALE, hex.r * BIOME_WALL_NOISE_SCALE, 3, 0.55, 2.0);
+      const normalised = (sample + 1) * 0.5;
+      if (normalised < density) tile.terrainId = 'mountain';
+    }
   }
 
   // Override the BiomeAnchor's decorator id and radius post-spawn. The

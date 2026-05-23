@@ -85,8 +85,10 @@ export function buildPathOverlay(pathPlan, hexSize) {
   const redHex = 0xff6c6c;
   const startPixel = hexToPixel(pathPlan.startQ, pathPlan.startR, hexSize);
 
+  // Stop one step short — the destination hex gets an X sprite (below)
+  // instead of an arrow so the two markers don't overlap.
   let previousPoint = { x: startPixel.x, z: startPixel.z };
-  for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
+  for (let stepIndex = 0; stepIndex < steps.length - 1; stepIndex++) {
     const step = steps[stepIndex];
     const stepPoint = hexToPixel(step.q, step.r, hexSize);
     const reachableThisTurn = step.cumulativeCost <= pathPlan.movementLeft;
