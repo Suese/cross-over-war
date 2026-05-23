@@ -205,7 +205,7 @@ export default {
       baseTerrainId: PASTRY_PLAINS_ID,
       paintRules: {
         'plains':      { high: PASTRY_HILLS_ID, mid: PASTRY_PLAINS_VARIANTS, low: PASTRY_PLAINS_VARIANTS, scale: 0.13 },
-        'dusty-hills': { high: BRICK_ID, mid: PASTRY_MOUNTAINS_ID, low: PASTRY_HILLS_ID, scale: 0.20 },
+        'rocky-hills': { high: BRICK_ID, mid: PASTRY_MOUNTAINS_ID, low: PASTRY_HILLS_ID, scale: 0.20 },
         'deep-ocean':  { high: 'shallow-ocean', low: 'deep-ocean', scale: 0.16 },
       },
       scatters: [
@@ -221,7 +221,7 @@ export default {
       baseTerrainId: PASTRY_PLAINS_ID,
       paintRules: {
         'plains':      { high: PASTRY_HILLS_ID, mid: PASTRY_PLAINS_VARIANTS, low: PASTRY_PLAINS_VARIANTS, scale: 0.18 },
-        'dusty-hills': { high: PASTRY_MOUNTAINS_ID, low: PASTRY_HILLS_ID, scale: 0.20 },
+        'rocky-hills': { high: PASTRY_MOUNTAINS_ID, low: PASTRY_HILLS_ID, scale: 0.20 },
         'deep-ocean':  { low: 'deep-ocean' },
       },
       scatters: [

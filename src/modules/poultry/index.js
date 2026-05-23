@@ -44,26 +44,26 @@ export default {
       id: PRIMARY_BIOME_ID,
       baseTerrainId: 'plains',
       paintRules: {
-        'plains':      { high: 'dusty-hills', mid: 'plains', low: 'plains', scale: 0.13 },
-        'dusty-hills': { high: 'mountain', mid: 'dusty-hills', low: 'dusty-hills', scale: 0.20 },
+        'plains':      { high: 'rocky-hills', mid: 'plains', low: 'plains', scale: 0.13 },
+        'rocky-hills': { high: 'mountain', mid: 'rocky-hills', low: 'rocky-hills', scale: 0.20 },
         'deep-ocean':  { high: 'shallow-ocean', low: 'deep-ocean', scale: 0.18 },
       },
       scatters: [
-        { prefabId: 'testing/campfire', density: 1/32, terrainIds: ['plains', 'dusty-hills'] },
+        { prefabId: 'testing/campfire', density: 1/32, terrainIds: ['plains', 'rocky-hills'] },
         { prefabId: 'testing/fish-school', density: 1/55, terrainIds: ['shallow-ocean'] },
       ],
     });
     // Secondary: dust bowl — a contribution of arid badlands to the wider map.
     registerPaintBiomeDecorator(registry, {
       id: SECONDARY_BIOME_ID,
-      baseTerrainId: 'dusty-hills',
+      baseTerrainId: 'rocky-hills',
       paintRules: {
-        'plains':      { high: 'dusty-hills', mid: 'dusty-hills', low: 'plains', scale: 0.18 },
-        'dusty-hills': { high: 'mountain', mid: 'dusty-hills', low: 'dusty-hills', scale: 0.20 },
+        'plains':      { high: 'rocky-hills', mid: 'rocky-hills', low: 'plains', scale: 0.18 },
+        'rocky-hills': { high: 'mountain', mid: 'rocky-hills', low: 'rocky-hills', scale: 0.20 },
         'deep-ocean':  { low: 'deep-ocean' },
       },
       scatters: [
-        { prefabId: 'testing/campfire', density: 1/45, terrainIds: ['plains', 'dusty-hills'] },
+        { prefabId: 'testing/campfire', density: 1/45, terrainIds: ['plains', 'rocky-hills'] },
       ],
     });
 

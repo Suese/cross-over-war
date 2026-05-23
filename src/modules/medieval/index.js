@@ -44,7 +44,7 @@ export default {
       baseTerrainId: 'plains',
       paintRules: {
         'plains':      { high: 'grassy-hills', mid: 'plains', low: 'plains', scale: 0.14 },
-        'dusty-hills': { high: 'mountain', low: 'dusty-hills', scale: 0.20 },
+        'rocky-hills': { high: 'mountain', low: 'rocky-hills', scale: 0.20 },
         'deep-ocean':  { high: 'shallow-ocean', low: 'deep-ocean', scale: 0.18 },
       },
       scatters: [
@@ -58,7 +58,7 @@ export default {
       baseTerrainId: 'plains',
       paintRules: {
         'plains':      { high: 'forest-hills', mid: 'forest', low: 'forest', scale: 0.13 },
-        'dusty-hills': { high: 'mountain', low: 'dusty-hills', scale: 0.20 },
+        'rocky-hills': { high: 'mountain', low: 'rocky-hills', scale: 0.20 },
         'deep-ocean':  { low: 'deep-ocean' },
       },
       scatters: [

@@ -8,7 +8,7 @@
 //   • players_changed — roster updates (join, leave, name-matched reconnect).
 //
 // Map generation runs in three explicit passes inside startNewGame():
-//   Pass 1 — base terrain (deep-ocean / plains / dusty-hills) from perlin
+//   Pass 1 — base terrain (deep-ocean / plains / rocky-hills) from perlin
 //   Pass 2 — biome anchors: castles (one per player + neutrals up to max),
 //            plus additional biome anchors in the gaps, then per-tile
 //            assignment to nearest anchor within its radius
@@ -200,7 +200,7 @@ export class GameRoom {
     // forward.
     this._resolvePlayerKingdoms();
 
-    // PASS 1 — base terrain (deep-ocean / plains / dusty-hills) from perlin
+    // PASS 1 — base terrain (deep-ocean / plains / rocky-hills) from perlin
     const tiles = this._passOneTerrain();
 
     // PASS 2 — castles + additional biome anchors + tile→anchor assignment

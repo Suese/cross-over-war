@@ -45,7 +45,7 @@ export default {
       baseTerrainId: 'plains',
       paintRules: {
         'plains':      { high: 'forest-hills', mid: 'forest', low: 'plains', scale: 0.11 },
-        'dusty-hills': { high: 'mountain', mid: 'dusty-hills', low: 'dusty-hills', scale: 0.18 },
+        'rocky-hills': { high: 'mountain', mid: 'rocky-hills', low: 'rocky-hills', scale: 0.18 },
         'deep-ocean':  { high: 'shallow-ocean', mid: 'shallow-ocean', low: 'deep-ocean', scale: 0.20 },
       },
       scatters: [
@@ -56,10 +56,10 @@ export default {
     // Secondary: mountain pass — bonus rugged terrain on the wild map.
     registerPaintBiomeDecorator(registry, {
       id: SECONDARY_BIOME_ID,
-      baseTerrainId: 'dusty-hills',
+      baseTerrainId: 'rocky-hills',
       paintRules: {
-        'plains':      { high: 'forest-hills', mid: 'dusty-hills', low: 'plains', scale: 0.20 },
-        'dusty-hills': { high: 'mountain', mid: 'mountain', low: 'dusty-hills', scale: 0.20 },
+        'plains':      { high: 'forest-hills', mid: 'rocky-hills', low: 'plains', scale: 0.20 },
+        'rocky-hills': { high: 'mountain', mid: 'mountain', low: 'rocky-hills', scale: 0.20 },
         'deep-ocean':  { low: 'deep-ocean' },
       },
       scatters: [

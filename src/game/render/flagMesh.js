@@ -33,17 +33,27 @@ import {
 } from 'three';
 import { getEmblem } from '../ecs/registry.js';
 
-const POLE_HEIGHT = 0.75;
+const POLE_HEIGHT = 1.5;
 const POLE_RADIUS = 0.025;
 // Cloth doubled from its original 0.50 × 0.32 — the smaller size read as a
 // pin from a normal camera distance, so heroes / POI flags now match the
 // scale of the flag editor's preview canvas.
 const CLOTH_WIDTH = 1.00;
 const CLOTH_HEIGHT = 0.64;
+// Subdivide the cloth so the wind shader has vertices to displace. 16×6 is
+// plenty for a flag this small — coarser than this and the sine wave reads
+// as visible facets.
+const CLOTH_SEGMENTS_X = 16;
+const CLOTH_SEGMENTS_Y = 6;
 // In-game cloth texture matches the cloth's aspect ratio so the stripes /
 // emblem don't get stretched when mapped onto the plane.
 const FLAG_TEXTURE_WIDTH = 200;
 const FLAG_TEXTURE_HEIGHT = 128;
+
+// Shared wind-time uniform — every flag material references this same object
+// so one assignment per frame drives every flag in the scene. The cloth
+// mesh's `onBeforeRender` callback updates `value` before each draw.
+const windUniforms = { uTime: { value: 0 } };
 
 export const VALID_STRIPES = ['horizontal', 'vertical', 'diagonal'];
 export const VALID_EMBLEM_POSITIONS = ['center', 'top-left', 'top-right', 'bottom-left', 'bottom-right'];
@@ -94,17 +104,59 @@ export function buildFlagMesh(flagConfig, registry) {
     metalness: 0.0,
     side: DoubleSide,
   });
-  const cloth = new Mesh(new PlaneGeometry(CLOTH_WIDTH, CLOTH_HEIGHT), clothMaterial);
+  // Per-flag phase so neighbouring flags don't ripple in lockstep. Stays
+  // constant for the life of the mesh.
+  const phaseUniform = { value: Math.random() * Math.PI * 2 };
+  installFlagWindShader(clothMaterial, phaseUniform);
+  const cloth = new Mesh(
+    new PlaneGeometry(CLOTH_WIDTH, CLOTH_HEIGHT, CLOTH_SEGMENTS_X, CLOTH_SEGMENTS_Y),
+    clothMaterial,
+  );
   cloth.name = 'flag-cloth';
   // The pole-bound edge of the cloth sits flush with the pole; the rest
   // billows to one side.
   cloth.position.set(CLOTH_WIDTH / 2, POLE_HEIGHT - CLOTH_HEIGHT / 2, 0);
+  // Drive the shared time uniform once per draw. Every flag material reads
+  // from the same uniform object so neighbouring flags stay in sync on time
+  // (phase, set per-material above, breaks the lockstep).
+  cloth.onBeforeRender = () => {
+    windUniforms.uTime.value = performance.now() / 1000;
+  };
   group.add(cloth);
 
   group.userData.flagCanvas = canvas;
   group.userData.flagTexture = texture;
   applyFlagConfig(group, flagConfig, registry);
   return group;
+}
+
+// Inject a gentle sine-wave displacement into the standard material's
+// vertex shader. The pole-bound edge stays put (falloff = uv.x²); the free
+// edge ripples on the cloth-normal axis. Two stacked sines at different
+// frequencies and opposite time directions make the motion read as "wind"
+// rather than a clean sinusoid. Normals aren't recomputed — the wave is
+// small enough that the resulting shading inaccuracy doesn't register.
+function installFlagWindShader(material, phaseUniform) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = windUniforms.uTime;
+    shader.uniforms.uPhase = phaseUniform;
+    shader.vertexShader = 'uniform float uTime;\nuniform float uPhase;\n' + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      `
+        #include <begin_vertex>
+        {
+          // PlaneGeometry UVs run 0 → 1 across the cloth; uv.x == 0 at the
+          // pole-bound edge. Squaring the falloff anchors the pole firmly
+          // while letting the free edge whip.
+          float falloff = uv.x * uv.x;
+          float wave = sin(uv.x * 6.0 + uv.y * 2.5 + uTime * 2.5 + uPhase) * 0.10
+                     + sin(uv.x * 11.0 + uv.y * 4.0 - uTime * 1.7 + uPhase * 1.7) * 0.04;
+          transformed.z += wave * falloff;
+        }
+      `,
+    );
+  };
 }
 
 // Repaint an existing mounted flag with a new config. No-op if the mesh

@@ -136,7 +136,7 @@ export default {
 
     // ── Terrain definitions ─────────────────────────────────────────────
     // The base mapgen produces a coarse classification — plains for any
-    // land, deep-ocean for any sea, dusty-hills for any mountain. The
+    // land, deep-ocean for any sea, rocky-hills for any mountain. The
     // base decorator (registered below) refines plains/deep-ocean into a
     // grass/plains and shallow/deep mix. Biome decorators refine further
     // (forest, forest hills, mountain) on the hexes they're assigned.
@@ -251,26 +251,26 @@ export default {
     });
 
     registerTerrain(registry, {
-      id: 'dusty-hills',
-      name: 'Dusty Hills',
-      description: 'Rolling, broken slopes. Slow going on foot; trivial for anything that flies.',
+      id: 'rocky-hills',
+      name: 'Rocky Hills',
+      description: 'Rolling, broken slopes scattered with stone. Slow going on foot; trivial for anything that flies.',
       components: {
-        PassableByLand: { cost: 20 },
+        PassableByLand: { cost: 60 },
         PassableByAir: { cost: 1 },
         WorkableTerrain: { cost: 8 },
       },
       fallbackColor: 0xa68a5e,
       textureKey: 'base/mountain.png',
-      modelKey: 'base/dusty-hills.glb',
+      modelKey: 'base/rocky-hills.glb',
       tileHeight: 0.3,
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'texture',
-      assetKey: 'base/mountain.png', declaredFor: 'terrain:dusty-hills',
+      assetKey: 'base/mountain.png', declaredFor: 'terrain:rocky-hills',
     });
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'model',
-      assetKey: 'base/dusty-hills.glb', declaredFor: 'terrain:dusty-hills',
+      assetKey: 'base/rocky-hills.glb', declaredFor: 'terrain:rocky-hills',
     });
 
     registerTerrain(registry, {
@@ -433,7 +433,7 @@ export default {
         } else if (tile.terrainId === 'deep-ocean') {
           tile.terrainId = sample > 0.1 ? 'shallow-ocean' : 'deep-ocean';
         }
-        // dusty-hills outside any biome stays as-is — biomes handle further refinement.
+        // rocky-hills outside any biome stays as-is — biomes handle further refinement.
       }
     });
   },

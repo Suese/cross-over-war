@@ -75,7 +75,7 @@ export function generateMap(world, registry, options = {}) {
       let terrainId;
       if (normalised < seaThreshold) terrainId = 'deep-ocean';
       else if (normalised < mountainThreshold) terrainId = 'plains';
-      else terrainId = 'dusty-hills';
+      else terrainId = 'rocky-hills';
       const entityId = spawnFromPrefab(registry, tilePrefabId, world, { q, r, terrainId });
       created.push({ entityId, q, r, terrainId });
     }
