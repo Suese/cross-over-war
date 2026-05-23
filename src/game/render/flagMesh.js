@@ -64,7 +64,7 @@ export const DEFAULT_FLAG_CONFIG = Object.freeze({
 // away from the camera rather than standing dead-vertical. Y is the pole's
 // own up-axis (yawing it would just spin the cloth), Z would roll it
 // sideways — X is the correct pitch axis.
-const FLAG_BACK_TILT_RADIANS = Math.PI * 15 / 180;
+const FLAG_BACK_TILT_RADIANS = -Math.PI * 15 / 180;
 
 // Build a mesh group containing the pole and the cloth. The cloth's
 // material owns a CanvasTexture that's regenerated whenever the flag
