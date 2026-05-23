@@ -877,8 +877,8 @@ function msg(e) { return e?.message || String(e); }
 function readSelectedMapSize() {
   const select = $('map-size-select');
   const raw = Number(select?.value ?? 64);
-  // Allow 64 / 128 / 256 only — anything else falls back to the safe default.
-  const dimension = [64, 128, 256].includes(raw) ? raw : 64;
+  // Allow 32 / 64 / 128 / 256 only — anything else falls back to the safe default.
+  const dimension = [32, 64, 128, 256].includes(raw) ? raw : 64;
   return { width: dimension, height: dimension };
 }
 
