@@ -87,9 +87,12 @@ export function buildPlaceholderCastleMesh(accentColour) {
 
 // Register a paint-and-scatter biome decorator. `paintRules` maps a base
 // terrain id to a rule { high, mid, low, scale? } — the noise lookup picks
-// one of those terrain ids depending on the noise value. `scatters` is a
-// list of POI sprinkle rules — each places `density * matching-hexes` POIs
-// onto hexes whose post-paint terrain is in `terrainIds`.
+// one of those terrain ids depending on the noise value. Each band may be a
+// single terrain id OR an array of variant ids; arrays are modulated by a
+// second, finer-scale fractal noise so the variants alternate organically
+// across the biome.
+// `scatters` is a list of POI sprinkle rules — each places `density *
+// matching-hexes` POIs onto hexes whose post-paint terrain is in `terrainIds`.
 //
 // Scatter rule shape:
 //   { prefabId, density: 1/N, terrainIds: ['plains', ...], footprintOffsets? }
@@ -104,6 +107,21 @@ export function registerPaintBiomeDecorator(registry, {
     decorate(ctx) {
       const { world, registry: reg, anchorQ, anchorR, biomeHexes, seed, occupiedHexes } = ctx;
       const noise = createSeededNoise2D(seed + (anchorQ * 9301) + (anchorR * 49297));
+      // Separate seed for the variant-modulation pass so it doesn't correlate
+      // with the band-selection noise — keeps high-band and low-band variants
+      // sprinkled independently rather than mirroring the same pattern.
+      const variantNoise = createSeededNoise2D(seed + (anchorQ * 7349) + (anchorR * 31013) + 1217);
+      const VARIANT_SCALE = 0.55;  // fine-grained so variants tile every few hexes
+
+      function pickVariant(band, q, r) {
+        if (!Array.isArray(band)) return band;
+        if (band.length === 0) return undefined;
+        // Map noise from [-1, 1] to a discrete index in [0, band.length).
+        const n = fractalNoise2D(variantNoise, q * VARIANT_SCALE, r * VARIANT_SCALE, 3, 0.55, 2.0);
+        const t = (n + 1) * 0.5;
+        const idx = Math.min(band.length - 1, Math.max(0, Math.floor(t * band.length)));
+        return band[idx];
+      }
 
       // First pass — paint terrain. Group biome hexes by their pre-paint
       // base id so each rule only sees the hexes it was authored for.
@@ -120,9 +138,11 @@ export function registerPaintBiomeDecorator(registry, {
         const scale = rule.scale ?? 0.15;
         for (const { tile, hex } of list) {
           const n = fractalNoise2D(noise, hex.q * scale, hex.r * scale, 3, 0.55, 2.0);
-          if (rule.high !== undefined && n > 0.45) tile.terrainId = rule.high;
-          else if (rule.mid !== undefined && n > 0.05) tile.terrainId = rule.mid;
-          else if (rule.low !== undefined) tile.terrainId = rule.low;
+          let picked;
+          if (rule.high !== undefined && n > 0.45) picked = pickVariant(rule.high, hex.q, hex.r);
+          else if (rule.mid !== undefined && n > 0.05) picked = pickVariant(rule.mid, hex.q, hex.r);
+          else if (rule.low !== undefined) picked = pickVariant(rule.low, hex.q, hex.r);
+          if (picked !== undefined) tile.terrainId = picked;
         }
       }
 

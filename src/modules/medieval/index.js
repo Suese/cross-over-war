@@ -1,5 +1,4 @@
-// Medieval kingdom — knights, barons, dukes. Bonus: an extra starting hero
-// at the player's capital ("levy a second banner before the campaign").
+// Medieval kingdom — knights, barons, dukes.
 
 import {
   registerHero, registerKingdom,
@@ -76,13 +75,13 @@ export default {
     registerKingdom(registry, {
       id: KINGDOM_ID,
       name: 'Medieval',
-      description: 'Knights, banners, an extra retainer. Starts the campaign with one additional hero.',
+      description: 'Knights, banners, and a high-walled royal keep.',
       accentColour: ACCENT,
       castlePrefabId: CASTLE_PREFAB_ID,
       primaryBiomeId: PRIMARY_BIOME_ID,
       secondaryBiomeId: SECONDARY_BIOME_ID,
       heroIds: HERO_IDS,
-      bonus: { heroCountBonus: 1 },
+      bonus: {},
     });
   },
 };

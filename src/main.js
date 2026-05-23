@@ -9,7 +9,7 @@ import {
   loadAllProfiles, saveProfile, deleteProfile,
   loadActiveProfileName, saveActiveProfileName,
   defaultLobbyProfile, paintPreview, lobbyEmblems, lobbyKingdoms,
-  sanitiseFlagConfig,
+  lobbyHeroesForKingdom, sanitiseFlagConfig,
 } from './lobbyProfiles.js';
 import { defaultFlagConfigFor } from './game/render/playerColors.js';
 
@@ -130,9 +130,11 @@ function installProfileEditor() {
       name: lastActive,
       flag: sanitiseFlagConfig(profiles[lastActive].flag),
       kingdomId: profiles[lastActive].kingdomId ?? null,
+      heroId: profiles[lastActive].heroId ?? null,
     };
   }
   installKingdomPicker();
+  installHeroPicker();
   installEditorTabs();
   refreshProfileDropdown();
   applyProfileToInputs();
@@ -152,6 +154,7 @@ function installProfileEditor() {
         emblemPosition: emblemPositionSelect.value,
       }),
       kingdomId: myProfile.kingdomId ?? null,
+      heroId: myProfile.heroId ?? null,
     };
     if (emblemSizeOutput) emblemSizeOutput.value = Math.round(myProfile.flag.emblemSize * 100) + '%';
   }
@@ -164,7 +167,7 @@ function installProfileEditor() {
     // name (one that isn't saved yet) does NOT auto-create a profile — the
     // player has to click Save once to opt in.
     if (profiles[myProfile.name]) {
-      saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId);
+      saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId, myProfile.heroId);
       saveActiveProfileName(myProfile.name);
       profiles = loadAllProfiles();
     }
@@ -195,6 +198,7 @@ function installProfileEditor() {
     }
     emblemColour.value = hexToCss(myProfile.flag.emblemColour);
     refreshKingdomPickerSelection();
+    refreshHeroPickerOptions();
   }
 
   function redrawPreview() {
@@ -241,6 +245,7 @@ function installProfileEditor() {
       name: selected,
       flag: sanitiseFlagConfig(entry.flag),
       kingdomId: entry.kingdomId ?? null,
+      heroId: entry.heroId ?? null,
     };
     saveActiveProfileName(selected);
     applyProfileToInputs();
@@ -252,7 +257,7 @@ function installProfileEditor() {
   $('profile-save').addEventListener('click', () => {
     readEditorIntoProfile();
     if (!myProfile.name) return;
-    saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId);
+    saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId, myProfile.heroId);
     saveActiveProfileName(myProfile.name);
     profiles = loadAllProfiles();
     refreshProfileDropdown();
@@ -288,9 +293,14 @@ function installProfileEditor() {
     }
     select.addEventListener('change', () => {
       myProfile.kingdomId = select.value || null;
+      // Switching kingdoms invalidates the previously-picked hero — the new
+      // kingdom has its own roster. Drop back to "Random" rather than carry
+      // a hero id that no longer fits.
+      myProfile.heroId = null;
       refreshKingdomPickerSelection();
+      refreshHeroPickerOptions();
       if (profiles[myProfile.name]) {
-        saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId);
+        saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId, myProfile.heroId);
         profiles = loadAllProfiles();
         refreshProfileDropdown();
       }
@@ -311,6 +321,70 @@ function installProfileEditor() {
     }
     const kingdom = lobbyKingdoms().find(k => k.id === myProfile.kingdomId);
     desc.textContent = kingdom?.description ?? '';
+  }
+
+  // ── Hero picker ─────────────────────────────────────────────────────
+  // Populates from the *currently-selected* kingdom's hero roster. When the
+  // player picks "Random" for their kingdom we don't know what pool to
+  // offer, so the picker disables and falls back to "Random" hero too.
+  function installHeroPicker() {
+    const select = $('hero-select');
+    if (!select) return;
+    select.addEventListener('change', () => {
+      myProfile.heroId = select.value || null;
+      refreshHeroPickerSelection();
+      if (profiles[myProfile.name]) {
+        saveProfile(myProfile.name, myProfile.flag, myProfile.kingdomId, myProfile.heroId);
+        profiles = loadAllProfiles();
+        refreshProfileDropdown();
+      }
+      broadcastProfileIfInLobby();
+    });
+    refreshHeroPickerOptions();
+  }
+
+  function refreshHeroPickerOptions() {
+    const select = $('hero-select');
+    if (!select) return;
+    select.innerHTML = '';
+    const randomOption = document.createElement('option');
+    randomOption.value = '';
+    randomOption.textContent = 'Random';
+    select.appendChild(randomOption);
+    const heroes = lobbyHeroesForKingdom(myProfile.kingdomId);
+    for (const hero of heroes) {
+      const opt = document.createElement('option');
+      opt.value = hero.id;
+      opt.textContent = hero.name;
+      select.appendChild(opt);
+    }
+    // Kingdom is "Random" → no specific hero pool to offer.
+    select.disabled = !myProfile.kingdomId;
+    refreshHeroPickerSelection();
+  }
+
+  function refreshHeroPickerSelection() {
+    const select = $('hero-select');
+    if (!select) return;
+    // If the stored heroId no longer belongs to the kingdom (e.g. a stale
+    // saved profile after the kingdom changed), drop it back to Random.
+    const available = lobbyHeroesForKingdom(myProfile.kingdomId);
+    const stillValid = myProfile.heroId
+      && available.some(h => h.id === myProfile.heroId);
+    if (!stillValid) myProfile.heroId = null;
+    select.value = myProfile.heroId ?? '';
+    const desc = $('hero-description');
+    if (!desc) return;
+    if (!myProfile.kingdomId) {
+      desc.textContent = 'Pick a kingdom first to choose a hero.';
+      return;
+    }
+    if (!myProfile.heroId) {
+      desc.textContent = "Let the host pick a hero for you at game start.";
+      return;
+    }
+    const hero = available.find(h => h.id === myProfile.heroId);
+    desc.textContent = hero?.name ? 'Starting hero: ' + hero.name : '';
   }
 
   // ── Tab strip (Flag / Kingdom) ───────────────────────────────────────
@@ -645,6 +719,7 @@ function addCpuPlayer() {
     name,
     flag: sanitiseFlagConfig(defaultFlagConfigFor(id)),
     kingdomId: null,
+    heroId: null,
   };
   lobby.players.push({
     id, name, profile,
@@ -671,7 +746,12 @@ function updateCpuPlayer(playerId, updates) {
     slot.profile = { ...slot.profile, name: slot.name };
   }
   if ('kingdomId' in updates) {
-    slot.profile = { ...slot.profile, kingdomId: updates.kingdomId ?? null };
+    // Switching kingdoms invalidates the previously-picked hero — same rule
+    // as for the human picker.
+    slot.profile = { ...slot.profile, kingdomId: updates.kingdomId ?? null, heroId: null };
+  }
+  if ('heroId' in updates) {
+    slot.profile = { ...slot.profile, heroId: updates.heroId ?? null };
   }
   broadcastLobby();
   renderWaiting();
@@ -726,6 +806,28 @@ function renderWaiting() {
         updateCpuPlayer(player.id, { kingdomId: kingdomSelect.value || null });
       });
       controls.appendChild(kingdomSelect);
+      // Hero select — populated from the CPU's currently-selected kingdom.
+      // Disabled until a kingdom is chosen so we never offer a hero outside
+      // any roster.
+      const heroSelect = document.createElement('select');
+      heroSelect.className = 'cpu-hero-select';
+      const randomHero = document.createElement('option');
+      randomHero.value = '';
+      randomHero.textContent = 'Random hero';
+      heroSelect.appendChild(randomHero);
+      const cpuHeroes = lobbyHeroesForKingdom(player.profile?.kingdomId);
+      for (const hero of cpuHeroes) {
+        const opt = document.createElement('option');
+        opt.value = hero.id;
+        opt.textContent = hero.name;
+        heroSelect.appendChild(opt);
+      }
+      heroSelect.value = player.profile?.heroId ?? '';
+      heroSelect.disabled = !player.profile?.kingdomId;
+      heroSelect.addEventListener('change', () => {
+        updateCpuPlayer(player.id, { heroId: heroSelect.value || null });
+      });
+      controls.appendChild(heroSelect);
       // Remove button
       const removeBtn = document.createElement('button');
       removeBtn.className = 'small danger';
@@ -771,6 +873,7 @@ function startHostSession() {
     name: p.name,
     profile: p.profile ?? null,
     kingdomId: p.profile?.kingdomId ?? null,
+    heroId: p.profile?.heroId ?? null,
     isComputer: !!p.isComputer,
   }));
   const mapSize = pendingSaveSnapshot ? null : readSelectedMapSize();
@@ -814,6 +917,7 @@ function startClientSession() {
     name: p.name,
     profile: p.profile ?? null,
     kingdomId: p.profile?.kingdomId ?? null,
+    heroId: p.profile?.heroId ?? null,
     isComputer: !!p.isComputer,
   }));
   gameSession = startGameSession({

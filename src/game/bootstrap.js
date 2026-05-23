@@ -82,7 +82,11 @@ export function startGameSession({
           player.playerId ?? player.id,
           player.name,
           player.profile ?? null,
-          { kingdomId: player.kingdomId ?? null, isComputer: !!player.isComputer },
+          {
+            kingdomId: player.kingdomId ?? null,
+            heroId: player.heroId ?? player.profile?.heroId ?? null,
+            isComputer: !!player.isComputer,
+          },
         );
       }
     } else {
@@ -91,7 +95,11 @@ export function startGameSession({
           player.playerId ?? player.id,
           player.name,
           player.profile ?? null,
-          { kingdomId: player.kingdomId ?? null, isComputer: !!player.isComputer },
+          {
+            kingdomId: player.kingdomId ?? null,
+            heroId: player.heroId ?? player.profile?.heroId ?? null,
+            isComputer: !!player.isComputer,
+          },
         );
       }
       gameRoom.startNewGame();
@@ -829,6 +837,7 @@ export function startGameSession({
     if (mode !== 'host' || !gameRoom) return;
     gameRoom.addPlayer(peerId, name, profile, {
       kingdomId: profile?.kingdomId ?? null,
+      heroId: profile?.heroId ?? null,
       isComputer: false,
     });
     gameRoom.sendInitSnapshotTo(peerId);

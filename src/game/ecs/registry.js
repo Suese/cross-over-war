@@ -55,6 +55,14 @@ export function registerHero(registry, definition) {
   registry.heroes.set(definition.id, definition);
 }
 
+export function getHero(registry, heroId) {
+  return registry.heroes.get(heroId) ?? null;
+}
+
+export function listHeroes(registry) {
+  return Array.from(registry.heroes.values());
+}
+
 export function registerMapObjectType(registry, definition) {
   if (!definition.id) throw new Error('registerMapObjectType: id required');
   registry.mapObjectTypes.set(definition.id, definition);

@@ -172,6 +172,28 @@ export default {
       assetKey: 'base/plains.glb', declaredFor: 'terrain:plains',
     });
 
+    // Plains variant — same gameplay as 'plains', different mesh. The base
+    // decorator alternates between this and 'plains' via a fine-grained
+    // noise sample so the meadow doesn't look like a single repeated tile.
+    registerTerrain(registry, {
+      id: 'plains-2',
+      name: 'Plains',
+      description: 'Open meadow. Easy going for any traveller on foot.',
+      components: {
+        PassableByLand: { cost: 5 },
+        PassableByAir: { cost: 1 },
+        WorkableTerrain: { cost: 1 },
+      },
+      fallbackColor: 0x8fcc6a,
+      textureKey: 'base/grass.png',
+      modelKey: 'base/plains-2.glb',
+      tileHeight: 0,
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'base/plains-2.glb', declaredFor: 'terrain:plains-2',
+    });
+
     registerTerrain(registry, {
       id: 'grassy-hills',
       name: 'Grassy Hills',
@@ -385,18 +407,29 @@ export default {
 
     // ── Base decorator ──────────────────────────────────────────────────
     // Runs once over every tile that isn't inside any biome. Modulates the
-    // coarse mapgen output with perlin noise: plains → plains | grassy-hills,
-    // deep-ocean → deep-ocean | shallow-ocean. Dusty hills are left alone
-    // here — they only appear in biomes once the biome decorator has had a
-    // chance to refine them.
+    // coarse mapgen output with perlin noise: plains → plains | plains-2 |
+    // grassy-hills, deep-ocean → deep-ocean | shallow-ocean. Dusty hills are
+    // left alone here — they only appear in biomes once the biome decorator
+    // has had a chance to refine them.
+    //
+    // A second, finer-grained noise sample swaps half of the un-hilled plains
+    // for the 'plains-2' variant so the meadow reads with visible texture
+    // change rather than a single repeated mesh.
     setBaseDecorator(registry, ({ world, hexes, seed }) => {
       const noise = createSeededNoise2D(seed + 7901);
+      const variantNoise = createSeededNoise2D(seed + 31337);
       for (const hex of hexes) {
         const tile = getComponent(world, hex.entityId, 'Tile');
         if (!tile) continue;
         const sample = fractalNoise2D(noise, hex.q * 0.18, hex.r * 0.18, 3, 0.55, 2.0);
         if (tile.terrainId === 'plains') {
-          tile.terrainId = sample > 0.15 ? 'grassy-hills' : 'plains';
+          if (sample > 0.15) {
+            tile.terrainId = 'grassy-hills';
+          } else {
+            // Finer-scale roll picks which of the two plains skins to use.
+            const variant = fractalNoise2D(variantNoise, hex.q * 0.55, hex.r * 0.55, 3, 0.55, 2.0);
+            tile.terrainId = variant > 0 ? 'plains-2' : 'plains';
+          }
         } else if (tile.terrainId === 'deep-ocean') {
           tile.terrainId = sample > 0.1 ? 'shallow-ocean' : 'deep-ocean';
         }

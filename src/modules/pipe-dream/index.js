@@ -22,7 +22,11 @@ const HUT_DEFAULT_MESSAGE = 'Sorry {heroName} — the princess is in another cas
 
 // Pastry-themed terrain IDs — Pipe Dream reskins plains, hills, and mountains
 // as edible scenery. Brick is the impassable mountain variant (only fliers).
+// Pastry plains ships in two visually distinct skins (-1, -2); the biome
+// decorator alternates them via a fine-grained noise sample.
 const PASTRY_PLAINS_ID = 'pipe-dream/pastry-plains';
+const PASTRY_PLAINS_2_ID = 'pipe-dream/pastry-plains-2';
+const PASTRY_PLAINS_VARIANTS = [PASTRY_PLAINS_ID, PASTRY_PLAINS_2_ID];
 const PASTRY_HILLS_ID = 'pipe-dream/pastry-hills';
 const PASTRY_MOUNTAINS_ID = 'pipe-dream/pastry-mountains';
 const BRICK_ID = 'pipe-dream/brick';
@@ -72,6 +76,27 @@ export default {
     declareAssetReference(registry, {
       moduleName: MODULE_NAME, kind: 'model',
       assetKey: 'pipe-dream/pastry-plains.glb', declaredFor: 'terrain:' + PASTRY_PLAINS_ID,
+    });
+
+    // Pastry Plains variant — same gameplay, alternative mesh. The biome
+    // decorator's paintRules alternate this with the primary skin via a
+    // fine-scale noise sample so the dough fields read with visible texture.
+    registerTerrain(registry, {
+      id: PASTRY_PLAINS_2_ID,
+      name: 'Pastry Plains',
+      description: 'Sheets of golden dough rolled flat across the lowlands. Walks like ordinary plain.',
+      components: {
+        PassableByLand: { cost: 5 },
+        PassableByAir: { cost: 1 },
+        WorkableTerrain: { cost: 1 },
+      },
+      fallbackColor: 0xf2c98a,
+      modelKey: 'pipe-dream/pastry-plains-2.glb',
+      tileHeight: 0,
+    });
+    declareAssetReference(registry, {
+      moduleName: MODULE_NAME, kind: 'model',
+      assetKey: 'pipe-dream/pastry-plains-2.glb', declaredFor: 'terrain:' + PASTRY_PLAINS_2_ID,
     });
 
     registerTerrain(registry, {
@@ -179,13 +204,13 @@ export default {
       id: PRIMARY_BIOME_ID,
       baseTerrainId: PASTRY_PLAINS_ID,
       paintRules: {
-        'plains':      { high: PASTRY_HILLS_ID, mid: PASTRY_PLAINS_ID, low: PASTRY_PLAINS_ID, scale: 0.13 },
+        'plains':      { high: PASTRY_HILLS_ID, mid: PASTRY_PLAINS_VARIANTS, low: PASTRY_PLAINS_VARIANTS, scale: 0.13 },
         'dusty-hills': { high: BRICK_ID, mid: PASTRY_MOUNTAINS_ID, low: PASTRY_HILLS_ID, scale: 0.20 },
         'deep-ocean':  { high: 'shallow-ocean', low: 'deep-ocean', scale: 0.16 },
       },
       scatters: [
-        { prefabId: HUT_PREFAB_ID, density: 1/60, terrainIds: [PASTRY_PLAINS_ID], footprintOffsets: HUT_FOOTPRINT_OFFSETS },
-        { prefabId: 'testing/campfire', density: 1/35, terrainIds: [PASTRY_PLAINS_ID, PASTRY_HILLS_ID] },
+        { prefabId: HUT_PREFAB_ID, density: 1/60, terrainIds: PASTRY_PLAINS_VARIANTS, footprintOffsets: HUT_FOOTPRINT_OFFSETS },
+        { prefabId: 'testing/campfire', density: 1/35, terrainIds: [...PASTRY_PLAINS_VARIANTS, PASTRY_HILLS_ID] },
         { prefabId: 'testing/fish-school', density: 1/50, terrainIds: ['shallow-ocean', 'deep-ocean'] },
       ],
     });
@@ -195,13 +220,13 @@ export default {
       id: SECONDARY_BIOME_ID,
       baseTerrainId: PASTRY_PLAINS_ID,
       paintRules: {
-        'plains':      { high: PASTRY_HILLS_ID, mid: PASTRY_PLAINS_ID, low: PASTRY_PLAINS_ID, scale: 0.18 },
+        'plains':      { high: PASTRY_HILLS_ID, mid: PASTRY_PLAINS_VARIANTS, low: PASTRY_PLAINS_VARIANTS, scale: 0.18 },
         'dusty-hills': { high: PASTRY_MOUNTAINS_ID, low: PASTRY_HILLS_ID, scale: 0.20 },
         'deep-ocean':  { low: 'deep-ocean' },
       },
       scatters: [
-        { prefabId: HUT_PREFAB_ID, density: 1/120, terrainIds: [PASTRY_PLAINS_ID], footprintOffsets: HUT_FOOTPRINT_OFFSETS },
-        { prefabId: 'testing/campfire', density: 1/40, terrainIds: [PASTRY_PLAINS_ID, PASTRY_HILLS_ID] },
+        { prefabId: HUT_PREFAB_ID, density: 1/120, terrainIds: PASTRY_PLAINS_VARIANTS, footprintOffsets: HUT_FOOTPRINT_OFFSETS },
+        { prefabId: 'testing/campfire', density: 1/40, terrainIds: [...PASTRY_PLAINS_VARIANTS, PASTRY_HILLS_ID] },
       ],
     });
 

@@ -41,7 +41,10 @@ import { writeSave, newSaveId } from './persistence.js';
 // Fallback hero archetype pool, used when a kingdom doesn't supply enough
 // hero ids of its own (or when no kingdom resolved at all).
 const STARTING_HERO_ARCHETYPES = ['base/bob', 'base/alice', 'base/john', 'base/ringo'];
-const HEROES_PER_PLAYER = 2;
+// Each faction starts with exactly one castle and one hero — the player
+// picks both in the lobby. Kingdom-level "extra hero" bonuses are intentionally
+// no longer honoured; a single hero is part of the starting contract.
+const HEROES_PER_PLAYER = 1;
 const DEFAULT_MAP_DIMENSION = 64;
 const STARTING_MOVEMENT_MAX = 50;
 const DAYS_PER_WEEK = 7;
@@ -129,7 +132,7 @@ export class GameRoom {
   //   kingdomId  — selected kingdom id, or null to let the host pick at start.
   //   isComputer — true if the host owns this slot's actions (CPU player).
   addPlayer(connectingPlayerId, name, profile = null, options = {}) {
-    const { kingdomId = null, isComputer = false } = options;
+    const { kingdomId = null, heroId = null, isComputer = false } = options;
     // Reconnect / re-announce calls (e.g. peer rejoining a saved game) should
     // never flip the CPU flag on a slot that already exists. We only honour
     // `isComputer` when creating a fresh slot below.
@@ -144,6 +147,7 @@ export class GameRoom {
       reusableSlot.connected = true;
       if (profile) reusableSlot.profile = profile;
       if (kingdomId !== undefined) reusableSlot.kingdomId = kingdomId;
+      if (heroId !== undefined) reusableSlot.heroId = heroId;
       this._publishPlayersChanged();
       return connectingPlayerId;
     }
@@ -151,6 +155,7 @@ export class GameRoom {
     if (existing) {
       if (profile) existing.profile = profile;
       if (kingdomId !== undefined) existing.kingdomId = kingdomId;
+      if (heroId !== undefined) existing.heroId = heroId;
       return connectingPlayerId;
     }
     this.players.push({
@@ -158,6 +163,7 @@ export class GameRoom {
       name,
       profile,
       kingdomId,
+      heroId,
       isComputer,
       connected: true,
       originalPlayerId: null,
@@ -487,9 +493,7 @@ export class GameRoom {
     const heroTakenKeys = new Set();
     for (const castle of ownedCastles) {
       const kingdom = getKingdom(this.registry, castle.kingdomId);
-      const bonus = kingdom?.bonus ?? {};
-      const heroCount = HEROES_PER_PLAYER + (bonus.heroCountBonus ?? 0);
-      const spawns = this._findHeroSpawnsAroundCastle(castle, tilesByKey, overridesByKey, heroTakenKeys, heroCount);
+      const spawns = this._findHeroSpawnsAroundCastle(castle, tilesByKey, overridesByKey, heroTakenKeys, HEROES_PER_PLAYER);
       for (let i = 0; i < spawns.length; i++) {
         this._spawnPlayerHero(castle.playerId, castle.playerIndex, i, spawns[i], kingdom);
         heroTakenKeys.add(hexKey(spawns[i].q, spawns[i].r));
@@ -790,6 +794,7 @@ export class GameRoom {
       connected: false,
       profile: savedPlayer.profile ?? null,
       kingdomId: savedPlayer.kingdomId ?? null,
+      heroId: savedPlayer.heroId ?? savedPlayer.profile?.heroId ?? null,
       isComputer: !!savedPlayer.isComputer,
       originalPlayerId: savedPlayer.playerId,
       vanquished: !!savedPlayer.vanquished,
@@ -803,13 +808,20 @@ export class GameRoom {
     // the change buffer because clients pull the initial state from
     // init_snapshot, not deltas. We use the registry prefab directly here.
     //
-    // Hero archetype pool comes from the player's kingdom when available;
-    // otherwise the base/* fallbacks. Hero slot index just walks the pool
-    // (wrapping if needed).
-    const pool = (kingdom?.heroIds && kingdom.heroIds.length)
-      ? kingdom.heroIds
-      : STARTING_HERO_ARCHETYPES;
-    const archetypeId = pool[heroSlotIndex % pool.length];
+    // Archetype resolution order:
+    //   1. The player's lobby-picked heroId, if it belongs to this kingdom's pool
+    //   2. A random pick from the kingdom's heroIds
+    //   3. The base/* fallback pool (legacy / kingdomless setups)
+    const player = this.players.find(p => p.playerId === playerId);
+    const kingdomPool = (kingdom?.heroIds && kingdom.heroIds.length) ? kingdom.heroIds : null;
+    let archetypeId = null;
+    if (player?.heroId && kingdomPool?.includes(player.heroId)) {
+      archetypeId = player.heroId;
+    } else if (kingdomPool) {
+      archetypeId = kingdomPool[Math.floor(Math.random() * kingdomPool.length)];
+    } else {
+      archetypeId = STARTING_HERO_ARCHETYPES[heroSlotIndex % STARTING_HERO_ARCHETYPES.length];
+    }
     const archetype = this.registry.heroes.get(archetypeId);
     if (!archetype) throw new Error('missing hero archetype: ' + archetypeId);
     const bonus = kingdom?.bonus ?? {};

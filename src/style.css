@@ -506,7 +506,8 @@ button.danger:hover:not(:disabled) { background: rgba(255, 88, 114, 0.12); }
   font-size: 12px;
   padding: 4px 6px;
 }
-.cpu-controls .cpu-kingdom-select {
+.cpu-controls .cpu-kingdom-select,
+.cpu-controls .cpu-hero-select {
   flex: 1 1 auto;
   font-size: 12px;
   padding: 4px 6px;

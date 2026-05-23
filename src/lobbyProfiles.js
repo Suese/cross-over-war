@@ -13,7 +13,7 @@
 // the preview canvas.
 
 import { createWorld } from './game/ecs/world.js';
-import { createRegistry, listEmblems, listKingdoms } from './game/ecs/registry.js';
+import { createRegistry, listEmblems, listKingdoms, getHero, getKingdom } from './game/ecs/registry.js';
 import { loadAllModules } from './game/modules/moduleLoader.js';
 import { createAssetLoader } from './game/modules/assetLoader.js';
 import { sanitiseFlagConfig, paintFlagToCanvas, DEFAULT_FLAG_CONFIG } from './game/render/flagMesh.js';
@@ -46,21 +46,38 @@ export function lobbyKingdoms() {
   return listKingdoms(getLobbyRegistry());
 }
 
+// Return the resolved hero archetypes for a kingdom, in the kingdom's declared
+// order. Unknown / null kingdomId returns an empty list — callers fall back
+// to "Random" semantics there.
+export function lobbyHeroesForKingdom(kingdomId) {
+  if (!kingdomId) return [];
+  const registry = getLobbyRegistry();
+  const kingdom = getKingdom(registry, kingdomId);
+  if (!kingdom || !kingdom.heroIds) return [];
+  const out = [];
+  for (const heroId of kingdom.heroIds) {
+    const hero = getHero(registry, heroId);
+    if (hero) out.push(hero);
+  }
+  return out;
+}
+
 export function paintPreview(canvas, flagConfig) {
   paintFlagToCanvas(canvas, flagConfig, getLobbyRegistry());
 }
 
 // ── Profile storage ────────────────────────────────────────────────────────
 //
-// Storage shape: `{ [commanderName]: { flag, kingdomId } }`. The commander
-// name and the profile key are the same string — that's the whole point of
-// the name/profile unification. Picking a profile from the dropdown sets
-// the player's name, flag, and kingdom together; clicking Save writes the
-// current flag + kingdom under the current name.
+// Storage shape: `{ [commanderName]: { flag, kingdomId, heroId } }`. The
+// commander name and the profile key are the same string — that's the whole
+// point of the name/profile unification. Picking a profile from the
+// dropdown sets the player's name, flag, kingdom, and hero together;
+// clicking Save writes all four under the current name.
 //
-// Two legacy shapes migrate transparently on read:
-//   1. `{ [key]: { name, flag } }`  (pre-unification)        → use inner name as key
-//   2. `{ [name]: FlagConfig }`     (post-unification, pre-kingdom) → wrap, kingdomId: null
+// Legacy shapes migrate transparently on read:
+//   1. `{ [key]: { name, flag } }`        (pre-unification)             → use inner name as key
+//   2. `{ [name]: FlagConfig }`           (post-unification, pre-kingdom) → wrap, kingdomId/heroId: null
+//   3. `{ [name]: { flag, kingdomId } }`  (pre-hero-picker)             → heroId: null
 
 export function loadAllProfiles() {
   try {
@@ -73,17 +90,19 @@ export function loadAllProfiles() {
       if (value && typeof value === 'object' && 'flag' in value && !('colours' in value)) {
         // Pre-unification or current-shape entry. The 'colours' check is how
         // we tell apart "the value is a flag config" (current) from "the
-        // value is a wrapper { flag, kingdomId }" (new).
+        // value is a wrapper { flag, kingdomId, heroId }" (new).
         const name = String(value.name ?? key).trim().slice(0, 16) || key;
         out[name] = {
           flag: sanitiseFlagConfig(value.flag),
           kingdomId: value.kingdomId ?? null,
+          heroId: value.heroId ?? null,
         };
       } else {
         // Bare flag config under the name key — wrap it.
         out[key] = {
           flag: sanitiseFlagConfig(value),
           kingdomId: null,
+          heroId: null,
         };
       }
     }
@@ -93,13 +112,14 @@ export function loadAllProfiles() {
   }
 }
 
-export function saveProfile(name, flagConfig, kingdomId = null) {
+export function saveProfile(name, flagConfig, kingdomId = null, heroId = null) {
   const trimmed = String(name ?? '').trim().slice(0, 16);
   if (!trimmed) return;
   const profiles = loadAllProfiles();
   profiles[trimmed] = {
     flag: sanitiseFlagConfig(flagConfig),
     kingdomId: kingdomId ?? null,
+    heroId: heroId ?? null,
   };
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles)); } catch {}
 }
@@ -124,6 +144,7 @@ export function defaultLobbyProfile() {
     name: 'Commander',
     flag: { ...DEFAULT_FLAG_CONFIG, colours: [...DEFAULT_FLAG_CONFIG.colours] },
     kingdomId: null,  // null = host picks at game start
+    heroId: null,     // null = host picks from the resolved kingdom's pool
   };
 }
 
